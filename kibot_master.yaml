@@ -35,6 +35,14 @@ outputs:
       output: 'Outputs/%f-Gerbers.zip'
       # exclude_plates_for_dnp: true # Uncomment to exclude DNP components from solder paste layers
 
+  - name: 'bom_xml'
+    comment: 'Bill of Materials in XML format'
+    type: bom
+    options:
+      format: XML
+      output: 'Outputs/%f-BOM.xml'
+
+
 # --- How to use Design Variants in KiBot ---
 # To generate outputs for a specific design variant, define it here:
 # variants:
