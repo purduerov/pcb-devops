@@ -1,0 +1,45 @@
+kibot:
+  version: 1
+
+preflight:
+  run_erc: true
+  run_drc: true
+  check_zone_fills: true
+  check_fields:
+    - field: 'MPN'
+      description: 'Ensure Manufacturer Part Number exists'
+      severity: error
+    - field: 'DigiKey'
+      description: 'Ensure DigiKey Part Number exists'
+      severity: error
+
+
+outputs:
+  - name: 'schematic_pdf'
+    comment: 'Export schematic to PDF'
+    type: pdf_sch_print
+    options:
+      output: 'Outputs/%f-Schematic.pdf'
+
+  - name: 'interactive_bom'
+    comment: 'Generate Interactive HTML BOM (excludes DNP components by default)'
+    type: ibom
+    options:
+      output: 'Outputs/%f-iBOM.html'
+      # variant: 'variant_name' # Uncomment and replace to generate for a specific variant
+
+  - name: 'gerber_pack'
+    comment: 'Gerbers and Drills for manufacturing'
+    type: gerber
+    options:
+      output: 'Outputs/%f-Gerbers.zip'
+      # exclude_plates_for_dnp: true # Uncomment to exclude DNP components from solder paste layers
+
+# --- How to use Design Variants in KiBot ---
+# To generate outputs for a specific design variant, define it here:
+# variants:
+#   - name: 'HighPower_Variant'
+#     comment: 'Variant with higher current rating resistors populated'
+#     type: 'kibom'
+#     # In KiCad, add a custom field 'Config' to components with values like '+HighPower_Variant'
+

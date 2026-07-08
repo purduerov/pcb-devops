@@ -1,0 +1,30 @@
+name: Central KiCad CI
+on:
+  workflow_call:
+
+jobs:
+  kicad-processing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Board Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Fetch Master KiBot Config
+        run: |
+          curl -sSL https://raw.githubusercontent.com/purdue-rov/pcb-devops/main/kibot_master.yaml -o local_kibot.yaml
+
+      - name: Run ERC, DRC, and Exports
+        uses: INTI-CMNB/KiBot@v2
+        with:
+          config: local_kibot.yaml
+          dir: Generated_Outputs
+          schema: '*.kicad_sch'
+          board: '*.kicad_pcb'
+
+      - name: Upload Generated Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabrication-files
+          path: Generated_Outputs/
