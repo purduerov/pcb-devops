@@ -15,7 +15,7 @@ jobs:
       - name: Checkout DevOps Tools
         uses: actions/checkout@v6
         with:
-          repository: purdue-rov/pcb-devops
+          repository: purduerov/pcb-devops
           path: pcb-devops-tools
 
       - name: Setup Python

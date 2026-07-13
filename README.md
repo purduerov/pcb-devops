@@ -22,5 +22,5 @@ on:
 
 jobs:
   run-validation:
-    uses: purdue-rov/pcb-devops/.github/workflows/run-kicad-ci.yml@main
+    uses: purduerov/pcb-devops/.github/workflows/run-kicad-ci.yml@master
 ```

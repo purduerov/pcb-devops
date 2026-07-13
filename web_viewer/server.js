@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 // Environment configurations
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // PAT or installation token
-const GITHUB_ORG = process.env.GITHUB_ORG || "purdue-rov";
+const GITHUB_ORG = process.env.GITHUB_ORG || "purduerov";
 const DEFAULT_REPO = process.env.DEFAULT_REPO || "board-template";
 
 app.use(express.static(path.join(__dirname)));
