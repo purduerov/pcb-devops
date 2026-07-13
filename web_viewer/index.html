@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Purdue ROV - Interactive CAD Design Review</title>
+    <!-- load KiCanvas Web Component library -->
+    <script type="module" src="https://unpkg.com/kicanvas@0.2.0-alpha/dist/kicanvas.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --border-color: #334155;
+            --text-color: #f8fafc;
+            --header-bg: #0b0f19;
+            --accent-color: #f59e0b;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        header {
+            background-color: var(--header-bg);
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .meta-info {
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+
+        .meta-info span {
+            color: var(--accent-color);
+            font-weight: bold;
+        }
+
+        .viewer-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-color);
+        }
+
+        .panel:last-child {
+            border-right: none;
+        }
+
+        .panel-header {
+            background-color: var(--panel-bg);
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #cbd5e1;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        /* Styling for KiCanvas Web Component */
+        kicanvas-embed {
+            width: 100%;
+            height: 100%;
+            background-color: #0b0f19;
+        }
+
+        .empty-state {
+            padding: 2rem;
+            text-align: center;
+            color: #64748b;
+            margin: auto;
+        }
+
+        /* Responsive Layout for smaller screens */
+        @media (max-width: 900px) {
+            .viewer-container {
+                flex-direction: column;
+            }
+            .panel {
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+                height: 50%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Purdue ROV Subsystem Design Review</h1>
+        <div class="meta-info">
+            File Source: <span id="source-name">Loading...</span>
+        </div>
+    </header>
+
+    <div class="viewer-container">
+        <!-- Schematic Panel -->
+        <div class="panel">
+            <div class="panel-header">Schematic Sheet Viewer</div>
+            <kicanvas-embed 
+                id="schematic-viewer" 
+                src="" 
+                controls="full" 
+                controlslist="nofullscreen">
+                <div class="empty-state">No Schematic File Loaded</div>
+            </kicanvas-embed>
+        </div>
+
+        <!-- PCB Layout Panel -->
+        <div class="panel">
+            <div class="panel-header">PCB Layout Viewer</div>
+            <kicanvas-embed 
+                id="layout-viewer" 
+                src="" 
+                theme="witchhazel"
+                controls="full">
+                <div class="empty-state">No PCB File Loaded</div>
+            </kicanvas-embed>
+        </div>
+    </div>
+
+    <script>
+        // Parse parameters from query string (e.g. ?sch=schematic.kicad_sch&pcb=layout.kicad_pcb)
+        const params = new URLSearchParams(window.location.search);
+        
+        // Use local proxy endpoints if querying private repos, or direct URLs for public repos
+        const schUrl = params.get('sch') || '/api/fetch-private-cad?filename=board-template.kicad_sch';
+        const pcbUrl = params.get('pcb') || '/api/fetch-private-cad?filename=board-template.kicad_pcb';
+        const sourceLabel = params.get('source') || 'Central board-template';
+
+        document.getElementById('source-name').textContent = sourceLabel;
+
+        const schematicViewer = document.getElementById('schematic-viewer');
+        const layoutViewer = document.getElementById('layout-viewer');
+
+        // Set source URIs dynamically
+        if (schUrl) schematicViewer.setAttribute('src', schUrl);
+        if (pcbUrl) layoutViewer.setAttribute('src', pcbUrl);
+
+        // Programmatic Event Handling and Cross-Probe Emulation
+        schematicViewer.addEventListener('kicanvas:select', (event) => {
+            const selectedItem = event.detail;
+            if (selectedItem && selectedItem.refdes) {
+                console.log(`Cross-probing schematic selection: ${selectedItem.refdes}`);
+                // Highlight corresponding footprint on the PCB layout
+                layoutViewer.selectItemByRefDes(selectedItem.refdes);
+            }
+        });
+
+        layoutViewer.addEventListener('kicanvas:select', (event) => {
+            const selectedItem = event.detail;
+            if (selectedItem && selectedItem.refdes) {
+                console.log(`Cross-probing layout selection: ${selectedItem.refdes}`);
+                // Highlight corresponding symbol on the schematic
+                schematicViewer.selectItemByRefDes(selectedItem.refdes);
+            }
+        });
+
+        // Error Handling
+        schematicViewer.addEventListener('kicanvas:error', (error) => {
+            console.error("WASM-Rendering Pipeline Error in Schematic Viewer:", error);
+        });
+        
+        layoutViewer.addEventListener('kicanvas:error', (error) => {
+            console.error("WASM-Rendering Pipeline Error in Layout Viewer:", error);
+        });
+    </script>
+</body>
+</html>

@@ -7,13 +7,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Board Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 0 # Fetch all history for branch comparisons
+
+      - name: Checkout DevOps Tools
+        uses: actions/checkout@v6
+        with:
+          repository: purdue-rov/pcb-devops
+          path: pcb-devops-tools
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Run Central Symbol Library Linter
+        run: |
+          # Locate symbol libraries in the submodule and run the linter
+          if [ -d "libs/purdue-rov-kicad-lib/Symbols" ]; then
+            find libs/purdue-rov-kicad-lib/Symbols -name "*.kicad_sym" -exec python3 pcb-devops-tools/scripts/linter_validator.py {} +
+          else
+            echo "No central symbol library submodule found to lint."
+          fi
 
       - name: Fetch Master KiBot Config
         run: |
-          curl -sSL https://raw.githubusercontent.com/purdue-rov/pcb-devops/main/kibot_master.yaml -o local_kibot.yaml
+          cp pcb-devops-tools/kibot_master.yaml local_kibot.yaml
 
       - name: Run ERC, DRC, and Exports
         uses: INTI-CMNB/KiBot@v2
@@ -23,8 +44,51 @@ jobs:
           schema: '*.kicad_sch'
           board: '*.kicad_pcb'
 
+      - name: Run Component Sourcing Validation
+        env:
+          MOUSER_API_KEY: ${{ secrets.MOUSER_API_KEY }}
+          DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
+          DIGIKEY_CLIENT_SECRET: ${{ secrets.DIGIKEY_CLIENT_SECRET }}
+          DIGIKEY_REFRESH_TOKEN: ${{ secrets.DIGIKEY_REFRESH_TOKEN }}
+          DIGIKEY_TOKEN_PATH: ${{ github.workspace }}/digikey_token.json
+        run: |
+          # Find the generated XML BOM and query distributor APIs
+          XML_BOM=$(find Generated_Outputs -name "*.xml" | head -n 1)
+          if [ -n "$XML_BOM" ] && { [ -n "$MOUSER_API_KEY" ] || [ -n "$DIGIKEY_CLIENT_ID" ]; }; then
+            python3 pcb-devops-tools/scripts/fetch_sourcing_bom.py "$XML_BOM"
+          else
+            echo "Skipping sourcing check: XML BOM or sourcing API credentials not present."
+          fi
+
+      - name: Run Visual PR PCB Diff
+        if: github.event_name == 'pull_request'
+        run: |
+          # Install ImageMagick to perform overlays
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          
+          # Find the layout file
+          PCB_FILE=$(find . -maxdepth 1 -name "*.kicad_pcb" | head -n 1)
+          
+          if [ -n "$PCB_FILE" ]; then
+            # Run comparison using kicad-cli inside KiBot docker image or locally via runner CLI
+            # Since the runner is ubuntu-latest, we install KiCad CLI or use container actions
+            # For simplicity, we execute the visual diff script using docker to access kicad-cli
+            docker run --rm -v "$(pwd):/workspace" -w /workspace \
+              --entrypoint /bin/bash setsoft/kibot:latest \
+              ./pcb-devops-tools/scripts/visual_diff.sh "${{ github.base_ref }}" "${{ github.head_ref }}" "$PCB_FILE"
+          else
+            echo "No .kicad_pcb file found for visual diff."
+          fi
+
       - name: Upload Generated Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: fabrication-files
           path: Generated_Outputs/
+
+      - name: Upload PR Visual Diffs
+        if: github.event_name == 'pull_request' && hashFiles('out/diff/compare/*.png') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-pcb-diffs
+          path: out/diff/compare/
