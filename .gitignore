@@ -1,0 +1,21 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node.js dependencies
+node_modules/
+
+# Local/testing configuration files (API tokens, dynamic configs)
+digikey_token.json
+local_kibot.yaml
+
+# Local Output/Diff folders
+out/
+Generated_Outputs/
+Outputs/
+
+# OS/Editor files
+.DS_Store
+Thumbs.db
