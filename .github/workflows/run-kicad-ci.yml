@@ -47,13 +47,17 @@ jobs:
       - name: Run Component Sourcing Validation
         env:
           MOUSER_API_KEY: ${{ secrets.MOUSER_API_KEY }}
+          DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
+          DIGIKEY_CLIENT_SECRET: ${{ secrets.DIGIKEY_CLIENT_SECRET }}
+          DIGIKEY_REFRESH_TOKEN: ${{ secrets.DIGIKEY_REFRESH_TOKEN }}
+          DIGIKEY_TOKEN_PATH: ${{ github.workspace }}/digikey_token.json
         run: |
-          # Find the generated XML BOM and query mouser
+          # Find the generated XML BOM and query distributor APIs
           XML_BOM=$(find Generated_Outputs -name "*.xml" | head -n 1)
-          if [ -n "$XML_BOM" ] && [ -n "$MOUSER_API_KEY" ]; then
+          if [ -n "$XML_BOM" ] && { [ -n "$MOUSER_API_KEY" ] || [ -n "$DIGIKEY_CLIENT_ID" ]; }; then
             python3 pcb-devops-tools/scripts/fetch_sourcing_bom.py "$XML_BOM"
           else
-            echo "Skipping sourcing check: XML BOM or MOUSER_API_KEY not present."
+            echo "Skipping sourcing check: XML BOM or sourcing API credentials not present."
           fi
 
       - name: Run Visual PR PCB Diff
