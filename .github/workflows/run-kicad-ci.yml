@@ -7,19 +7,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Board Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 0 # Fetch all history for branch comparisons
 
       - name: Checkout DevOps Tools
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: purdue-rov/pcb-devops
           path: pcb-devops-tools
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
