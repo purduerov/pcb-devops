@@ -36,13 +36,25 @@ jobs:
         run: |
           cp pcb-devops-tools/kibot_master.yaml local_kibot.yaml
 
+      - name: Resolve KiCad File Names
+        id: kicad_files
+        run: |
+          SCH=$(ls *.kicad_sch 2>/dev/null | head -n 1)
+          PCB=$(ls *.kicad_pcb 2>/dev/null | head -n 1)
+          if [ -z "$SCH" ]; then echo "ERROR: No .kicad_sch file found!" && exit 1; fi
+          if [ -z "$PCB" ]; then echo "ERROR: No .kicad_pcb file found!" && exit 1; fi
+          echo "Found schematic: $SCH"
+          echo "Found board: $PCB"
+          echo "schema=$SCH" >> $GITHUB_OUTPUT
+          echo "board=$PCB"  >> $GITHUB_OUTPUT
+
       - name: Run ERC, DRC, and Exports
         uses: INTI-CMNB/KiBot@v2
         with:
           config: local_kibot.yaml
           dir: Generated_Outputs
-          schema: '*.kicad_sch'
-          board: '*.kicad_pcb'
+          schema: ${{ steps.kicad_files.outputs.schema }}
+          board: ${{ steps.kicad_files.outputs.board }}
 
       - name: Run Component Sourcing Validation
         env:
