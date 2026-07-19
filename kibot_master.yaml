@@ -7,10 +7,8 @@ preflight:
   check_zone_fills: true
   check_fields:
     - field: 'MPN'
-      description: 'Ensure Manufacturer Part Number exists'
       severity: error
     - field: 'DigiKey'
-      description: 'Ensure DigiKey Part Number exists'
       severity: error
 
 
