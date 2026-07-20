@@ -49,7 +49,7 @@ jobs:
           echo "board=$PCB"  >> $GITHUB_OUTPUT
 
       - name: Run ERC, DRC, and Exports
-        uses: INTI-CMNB/KiBot@v2
+        uses: INTI-CMNB/KiBot@v2_k10
         with:
           config: local_kibot.yaml
           dir: Generated_Outputs
