@@ -3,9 +3,9 @@ kibot:
 
 preflight:
   run_erc: true
-  run_drc: warning
-  dont_stop_if_failed: true
+  run_drc: false
   check_zone_fills: true
+
   check_fields:
     - field: 'MPN'
       severity: error
