@@ -94,8 +94,12 @@ def get_digikey_access_token():
                 "refresh_token": res_data.get("refresh_token")
             }
             try:
-                with open(DIGIKEY_TOKEN_PATH, 'w') as f:
+                flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                fd = os.open(DIGIKEY_TOKEN_PATH, flags, 0o600)
+                with open(fd, 'w') as f:
                     json.dump(new_token_data, f)
+                # Ensure permissions are correct if the file already existed
+                os.chmod(DIGIKEY_TOKEN_PATH, 0o600)
             except Exception as e:
                 print(f"Warning: Failed to save updated DigiKey token file: {e}", file=sys.stderr)
             return new_token_data["access_token"]
