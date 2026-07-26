@@ -30,3 +30,7 @@ jobs:
       - name: Validate YAML Syntax
         run: |
           python3 -c "import yaml; yaml.safe_load(open('kibot_master.yaml'))"
+
+      - name: Run Python Tests
+        run: |
+          python3 -m unittest discover -s scripts -p "test_*.py"
