@@ -4,7 +4,9 @@ import re
 import os
 
 # Mandatory fields that must be present in every component symbol
-MANDATORY_FIELDS = ["MPN", "Manufacturer", "Datasheet", "Temp_Range", "DigiKey"]
+MANDATORY_FIELDS = ["MPN", "Manufacturer", "Datasheet", "Temp_Range", "DigiKey", "Category"]
+
+ALLOWED_CATEGORIES = ["Passives", "Power", "Logic", "Connectors", "Sensors", "Mech"]
 
 def check_kicad_symbol_file(filepath):
     errors = []
@@ -44,6 +46,11 @@ def check_kicad_symbol_file(filepath):
                 if field_name in MANDATORY_FIELDS and field_value.strip():
                     present_fields.add(field_name)
                     
+                # Validate Category
+                if field_name == "Category":
+                    if field_value not in ALLOWED_CATEGORIES:
+                        errors.append(f"Symbol '{current_symbol}' has invalid Category '{field_value}'. Must be one of: {', '.join(ALLOWED_CATEGORIES)}")
+
                 # Validate Datasheet URL formatting
                 if field_name == "Datasheet":
                     if not (field_value.startswith("http://") or field_value.startswith("https://")):
@@ -61,17 +68,29 @@ def check_kicad_symbol_file(filepath):
     return errors
 
 if __name__ == "__main__":
+    import glob
     if len(sys.argv) < 2:
-        print("Usage: ./linter_validator.py <symbols.kicad_sym>")
+        print("Usage: ./linter_validator.py <symbols.kicad_sym> [...]")
         sys.exit(1)
         
-    symbols_file = sys.argv[1]
-    print(f"Linting KiCad symbol file: {symbols_file}")
-    validation_errors = check_kicad_symbol_file(symbols_file)
-    
-    if validation_errors:
+    symbol_files = []
+    for arg in sys.argv[1:]:
+        # Note: On Windows we might get raw wildcards, so glob them
+        matched = glob.glob(arg)
+        if matched:
+            symbol_files.extend(matched)
+        else:
+            # If no match (e.g. not a wildcard, just a file that doesn't exist yet), still add it to be checked
+            symbol_files.append(arg)
+            
+    all_errors = []
+    for symbols_file in symbol_files:
+        print(f"Linting KiCad symbol file: {symbols_file}")
+        all_errors.extend(check_kicad_symbol_file(symbols_file))
+        
+    if all_errors:
         print("\n❌ Linter Verification Failed:", file=sys.stderr)
-        for err in validation_errors:
+        for err in all_errors:
             print(f" - {err}", file=sys.stderr)
         sys.exit(1)
         
