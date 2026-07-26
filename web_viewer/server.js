@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // PAT or installation token
 const GITHUB_ORG = process.env.GITHUB_ORG || "purduerov";
 const DEFAULT_REPO = process.env.DEFAULT_REPO || "board-template";
+const ALLOWED_REPOS = process.env.ALLOWED_REPOS ? process.env.ALLOWED_REPOS.split(',') : [DEFAULT_REPO];
 
 app.use(express.static(path.join(__dirname)));
 
@@ -22,6 +23,16 @@ app.get('/api/fetch-private-cad', async (req, res) => {
 
     if (!filename) {
         return res.status(400).send("Bad Request: filename parameter is required.");
+    }
+
+    // Sanitize filename to prevent directory traversal
+    if (filename.includes('..') || filename.startsWith('/')) {
+        return res.status(400).send("Bad Request: Invalid filename.");
+    }
+
+    // Restrict target repository to an allowlist
+    if (!ALLOWED_REPOS.includes(targetRepo)) {
+        return res.status(403).send("Forbidden: Target repository is not allowed.");
     }
 
     if (!GITHUB_TOKEN) {
