@@ -29,6 +29,7 @@ class TestLinterValidator(unittest.TestCase):
     (property "Datasheet" "https://example.com/data.pdf")
     (property "Temp_Range" "-40 to 85")
     (property "DigiKey" "123-456-ND")
+    (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
@@ -42,6 +43,7 @@ class TestLinterValidator(unittest.TestCase):
     (property "Manufacturer" "TestCorp")
     (property "Datasheet" "https://example.com/data.pdf")
     (property "Temp_Range" "-40 to 85")
+    (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
@@ -57,6 +59,7 @@ class TestLinterValidator(unittest.TestCase):
     (property "Datasheet" "https://example.com/data.pdf")
     (property "Temp_Range" "-40 to 85")
     (property "DigiKey_SKU" "123-456-ND")
+    (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
@@ -71,6 +74,7 @@ class TestLinterValidator(unittest.TestCase):
     (property "Datasheet" "ftp://example.com/data.pdf")
     (property "Temp_Range" "-40 to 85")
     (property "DigiKey" "123-456-ND")
+    (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
@@ -86,6 +90,7 @@ class TestLinterValidator(unittest.TestCase):
     (property "Datasheet" "https://example.com/data.html")
     (property "Temp_Range" "-40 to 85")
     (property "DigiKey" "123-456-ND")
+    (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
@@ -111,6 +116,7 @@ class TestLinterValidator(unittest.TestCase):
     (property "Datasheet" "https://example.com/data.pdf")
     (property "Temp_Range" "-40 to 85")
     (property "DigiKey" "   ")
+    (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
@@ -118,5 +124,22 @@ class TestLinterValidator(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("missing mandatory field: DigiKey", errors[0])
 
+    def test_invalid_category(self):
+        content = """(kicad_symbol_lib
+  (symbol "TestSymbol"
+    (property "MPN" "12345")
+    (property "Manufacturer" "TestCorp")
+    (property "Datasheet" "https://example.com/data.pdf")
+    (property "Temp_Range" "-40 to 85")
+    (property "DigiKey" "123-456-ND")
+    (property "Category" "InvalidCategory")
+  )
+)"""
+        filepath = self.create_temp_file(content)
+        errors = check_kicad_symbol_file(filepath)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("invalid Category 'InvalidCategory'", errors[0])
+
 if __name__ == '__main__':
     unittest.main()
+
