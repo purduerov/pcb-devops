@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 import urllib.request
 import urllib.parse
 import json
