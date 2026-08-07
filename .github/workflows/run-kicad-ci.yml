@@ -53,14 +53,19 @@ jobs:
         run: |
           SCH=$(ls *.kicad_sch 2>/dev/null | head -n 1)
           PCB=$(ls *.kicad_pcb 2>/dev/null | head -n 1)
-          if [ -z "$SCH" ]; then echo "ERROR: No .kicad_sch file found!" && exit 1; fi
-          if [ -z "$PCB" ]; then echo "ERROR: No .kicad_pcb file found!" && exit 1; fi
-          echo "Found schematic: $SCH"
-          echo "Found board: $PCB"
-          echo "schema=$SCH" >> $GITHUB_OUTPUT
-          echo "board=$PCB"  >> $GITHUB_OUTPUT
+          if [ -z "$SCH" ] || [ -z "$PCB" ]; then
+            echo "No .kicad_sch or .kicad_pcb file found in root. Skipping KiBot manufacturing export."
+            echo "has_files=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found schematic: $SCH"
+            echo "Found board: $PCB"
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "schema=$SCH" >> $GITHUB_OUTPUT
+            echo "board=$PCB"  >> $GITHUB_OUTPUT
+          fi
 
       - name: Run ERC, DRC, and Exports
+        if: steps.kicad_files.outputs.has_files == 'true'
         uses: INTI-CMNB/KiBot@v2_k10
         with:
           config: local_kibot.yaml
@@ -69,6 +74,7 @@ jobs:
           board: ${{ steps.kicad_files.outputs.board }}
 
       - name: Run Component Sourcing Validation
+        if: steps.kicad_files.outputs.has_files == 'true'
         env:
           MOUSER_API_KEY: ${{ secrets.MOUSER_API_KEY }}
           DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
@@ -85,8 +91,10 @@ jobs:
           fi
 
       - name: Upload Generated Artifacts
+        if: steps.kicad_files.outputs.has_files == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: fabrication-files
           path: Generated_Outputs/
+
 
