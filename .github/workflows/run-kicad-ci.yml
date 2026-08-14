@@ -50,10 +50,20 @@ jobs:
       - name: Resolve KiCad File Names
         id: kicad_files
         run: |
-          SCH=$(ls *.kicad_sch 2>/dev/null | head -n 1)
           PCB=$(ls *.kicad_pcb 2>/dev/null | head -n 1)
+          if [ -n "$PCB" ]; then
+            BASENAME="${PCB%.kicad_pcb}"
+            if [ -f "${BASENAME}.kicad_sch" ]; then
+              SCH="${BASENAME}.kicad_sch"
+            else
+              SCH=$(ls *.kicad_sch 2>/dev/null | head -n 1)
+            fi
+          else
+            SCH=$(ls *.kicad_sch 2>/dev/null | head -n 1)
+          fi
+
           if [ -z "$SCH" ] || [ -z "$PCB" ]; then
-            echo "No .kicad_sch or .kicad_pcb file found in root. Skipping KiBot manufacturing export."
+            echo "No matching .kicad_sch or .kicad_pcb file found in root. Skipping KiBot manufacturing export."
             echo "has_files=false" >> $GITHUB_OUTPUT
           else
             echo "Found schematic: $SCH"
