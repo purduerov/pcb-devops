@@ -21,6 +21,12 @@ outputs:
     options:
       output: 'Outputs/%f-Schematic.pdf'
 
+  - name: 'board_layout_pdf'
+    comment: 'Export PCB layout to PDF'
+    type: pcb_print
+    options:
+      output: 'Outputs/%f-Layout.pdf'
+
   - name: 'interactive_bom'
     comment: 'Generate Interactive HTML BOM (excludes DNP components by default)'
     type: ibom
