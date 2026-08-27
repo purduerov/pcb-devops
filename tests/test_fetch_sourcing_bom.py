@@ -1,18 +1,19 @@
 import os
 import sys
-import pytest
+import tempfile
+import unittest
 
-# Add the 'scripts' directory to the python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
 from fetch_sourcing_bom import parse_kicad_xml_bom
 
-def test_missing_file_handling():
-    # Should return an empty dictionary and not crash when file is missing
-    parts = parse_kicad_xml_bom("non_existent_file.xml")
-    assert parts == {}
+class TestFetchSourcingBom(unittest.TestCase):
+    def test_missing_file_handling(self):
+        # Should return an empty dictionary and not crash when file is missing
+        parts = parse_kicad_xml_bom("non_existent_file.xml")
+        self.assertEqual(parts, {})
 
-def test_standard_extraction(tmp_path):
-    xml_content = """<?xml version="1.0" encoding="utf-8"?>
+    def test_standard_extraction(self):
+        xml_content = """<?xml version="1.0" encoding="utf-8"?>
 <export version="D">
   <components>
     <comp ref="R1">
@@ -35,20 +36,23 @@ def test_standard_extraction(tmp_path):
   </components>
 </export>
 """
-    xml_file = tmp_path / "bom.xml"
-    xml_file.write_text(xml_content)
+        with tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False, encoding='utf-8') as f:
+            f.write(xml_content)
+            temp_path = f.name
 
-    parts = parse_kicad_xml_bom(str(xml_file))
+        try:
+            parts = parse_kicad_xml_bom(temp_path)
+            self.assertEqual(len(parts), 2)
+            self.assertIn(("ERJ-3EKF1002V", "P10.0KHTR-ND"), parts)
+            self.assertEqual(parts[("ERJ-3EKF1002V", "P10.0KHTR-ND")], ["R1", "R2"])
+            self.assertIn(("CL10B104KB8NNNC", None), parts)
+            self.assertEqual(parts[("CL10B104KB8NNNC", None)], ["C1"])
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
-    assert len(parts) == 2
-    assert ("ERJ-3EKF1002V", "P10.0KHTR-ND") in parts
-    assert parts[("ERJ-3EKF1002V", "P10.0KHTR-ND")] == ["R1", "R2"]
-
-    assert ("CL10B104KB8NNNC", None) in parts
-    assert parts[("CL10B104KB8NNNC", None)] == ["C1"]
-
-def test_whitespace_handling(tmp_path):
-    xml_content = """<?xml version="1.0" encoding="utf-8"?>
+    def test_whitespace_handling(self):
+        xml_content = """<?xml version="1.0" encoding="utf-8"?>
 <export version="D">
   <components>
     <comp ref="R3">
@@ -60,12 +64,18 @@ def test_whitespace_handling(tmp_path):
   </components>
 </export>
 """
-    xml_file = tmp_path / "bom_whitespace.xml"
-    xml_file.write_text(xml_content)
+        with tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False, encoding='utf-8') as f:
+            f.write(xml_content)
+            temp_path = f.name
 
-    parts = parse_kicad_xml_bom(str(xml_file))
+        try:
+            parts = parse_kicad_xml_bom(temp_path)
+            self.assertEqual(len(parts), 1)
+            self.assertIn(("RES-10K", "DK-10K-RES"), parts)
+            self.assertEqual(parts[("RES-10K", "DK-10K-RES")], ["R3"])
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
-    assert len(parts) == 1
-    # Check if trailing/leading spaces are removed
-    assert ("RES-10K", "DK-10K-RES") in parts
-    assert parts[("RES-10K", "DK-10K-RES")] == ["R3"]
+if __name__ == '__main__':
+    unittest.main()

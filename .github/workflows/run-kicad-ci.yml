@@ -2,6 +2,17 @@ name: Central KiCad CI
 
 on:
   workflow_call:
+    inputs:
+      strict_drc:
+        description: 'Enforce strict DRC/ERC validation'
+        required: false
+        type: boolean
+        default: true
+      enable_sourcing_check:
+        description: 'Run DigiKey/Mouser BOM stock and lifecycle checks'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,19 +24,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout Board Repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0 # Fetch all history for branch comparisons
 
       - name: Checkout DevOps Tools
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: purduerov/pcb-devops
           path: pcb-devops-tools
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
@@ -43,9 +54,14 @@ jobs:
             echo "No central symbol library submodule found to lint."
           fi
 
-      - name: Fetch Master KiBot Config
+      - name: Configure KiBot Preflight Rules
         run: |
           cp pcb-devops-tools/kibot_master.yaml local_kibot.yaml
+          if [ "${{ inputs.strict_drc }}" = "false" ]; then
+            echo "Non-strict DRC requested. Relaxing preflight checks for WIP branch..."
+            sed -i 's/run_drc: true/run_drc: false/g' local_kibot.yaml
+            sed -i 's/run_erc: true/run_erc: false/g' local_kibot.yaml
+          fi
 
       - name: Resolve KiCad File Names
         id: kicad_files
@@ -83,7 +99,7 @@ jobs:
           board: ${{ steps.kicad_files.outputs.board }}
 
       - name: Run Component Sourcing Validation
-        if: steps.kicad_files.outputs.has_files == 'true'
+        if: steps.kicad_files.outputs.has_files == 'true' && inputs.enable_sourcing_check == true
         env:
           MOUSER_API_KEY: ${{ secrets.MOUSER_API_KEY }}
           DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
@@ -105,5 +121,3 @@ jobs:
         with:
           name: fabrication-files
           path: Generated_Outputs/
-
-

@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-    Purdue ROV PCB DevOps - Central Board Template Sync Tool (0 GitHub Actions Minutes)
+    Purdue ROV PCB DevOps - Central Board Template Sync Tool
 .DESCRIPTION
-    Propagates all infrastructure updates from `board-template` (launchers, .githooks, 
-    workflows, setup scripts, DRC rules) to all board repositories without using cloud CI minutes.
+    Safely propagates infrastructure updates from `board-template` (launchers, .githooks, 
+    workflows, setup scripts, DRC rules) to board repositories without CI minutes.
+    Only syncs repositories that are clean and on their default branch.
 #>
 
 param (
@@ -12,7 +13,7 @@ param (
 )
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Purdue ROV - Board Template Sync Tool (0 CI Minutes)" -ForegroundColor Cyan
+Write-Host "  Purdue ROV - Board Template Sync Tool" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 # If no target board directories specified, search sibling directories
@@ -28,16 +29,23 @@ if (-not $TargetBoardDirs -or $TargetBoardDirs.Count -eq 0) {
 }
 
 if (-not $TargetBoardDirs -or $TargetBoardDirs.Count -eq 0) {
-    Write-Host "⚠️ No target board repositories found to sync!" -ForegroundColor Yellow
+    Write-Host "No target board repositories found to sync." -ForegroundColor Yellow
     exit 0
 }
 
 foreach ($BoardDir in $TargetBoardDirs) {
     $BoardName = Split-Path -Path $BoardDir -Leaf
-    Write-Host "`n🔄 Processing repository: ${BoardName}..." -ForegroundColor Cyan
+    Write-Host "`nProcessing repository: ${BoardName}..." -ForegroundColor Cyan
     
     Push-Location $BoardDir
     try {
+        # Check for uncommitted changes first
+        $status = git status --porcelain
+        if ($status) {
+            Write-Host "  Skipping ${BoardName}: Working tree has uncommitted changes." -ForegroundColor Yellow
+            continue
+        }
+
         # 1. Ensure 'template' remote exists
         $Remotes = git remote
         if ($Remotes -notcontains "template") {
@@ -45,29 +53,39 @@ foreach ($BoardDir in $TargetBoardDirs) {
             git remote add template $TemplateUrl
         }
         
-        # 2. Fetch template updates
-        Write-Host "  Fetching latest changes from board-template..." -ForegroundColor Gray
+        # 2. Fetch origin and template updates
+        Write-Host "  Fetching latest changes from origin and template..." -ForegroundColor Gray
+        git fetch origin master --quiet
         git fetch template master --quiet
         
-        # 3. Merge template changes
+        # 3. Pull latest origin first
+        git pull origin master --ff-only --quiet 2>$null
+
+        # 4. Merge template changes
         Write-Host "  Merging template/master..." -ForegroundColor Gray
         $MergeOutput = git merge template/master --allow-unrelated-histories -m "chore: sync latest infrastructure updates from board-template" 2>&1
         
-        # 4. Sync submodule if present
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Merge conflict encountered in ${BoardName}. Aborting merge..." -ForegroundColor Red
+            git merge --abort 2>$null
+            continue
+        }
+
+        # 5. Sync submodule if present
         if (Test-Path "libs/purdue-rov-kicad-lib") {
             git -C libs/purdue-rov-kicad-lib pull origin master --quiet 2>$null
             git add libs/purdue-rov-kicad-lib 2>$null
             git commit -m "chore(submodule): sync purdue-rov-kicad-lib to latest master" 2>$null
         }
         
-        # 5. Push updates to remote master
+        # 6. Push updates to remote master
         Write-Host "  Pushing updates to origin/master..." -ForegroundColor Gray
         git push origin master --quiet
         
-        Write-Host "✅ Successfully synced board-template to ${BoardName}!" -ForegroundColor Green
+        Write-Host "Successfully synced board-template to ${BoardName}!" -ForegroundColor Green
     }
     catch {
-        Write-Host "❌ Failed to sync repo" -ForegroundColor Red
+        Write-Host "Error syncing ${BoardName}: $_" -ForegroundColor Red
     }
     finally {
         Pop-Location
@@ -75,5 +93,5 @@ foreach ($BoardDir in $TargetBoardDirs) {
 }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "🎉 Board template sync complete for all target repositories!" -ForegroundColor Green
+Write-Host "Board template sync complete." -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan

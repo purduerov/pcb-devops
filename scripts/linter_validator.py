@@ -4,9 +4,13 @@ import re
 import os
 
 # Mandatory fields that must be present in every component symbol
-MANDATORY_FIELDS = ["MPN", "Manufacturer", "Datasheet", "Temp_Range", "DigiKey", "Category"]
+MANDATORY_FIELDS = {"MPN", "Manufacturer", "Datasheet", "Temp_Range", "DigiKey", "Category"}
 
-ALLOWED_CATEGORIES = ["Passives", "Power", "Logic", "Connectors", "Sensors", "Mech"]
+ALLOWED_CATEGORIES = {"Passives", "Power", "Logic", "Connectors", "Sensors", "Mech"}
+
+SYM_PATTERN = re.compile(r'\(symbol "([^"]+)"')
+SUB_SYM_PATTERN = re.compile(r'_[0-9]+_[0-9]+$')
+PROP_PATTERN = re.compile(r'\(property "([^"]+)" "([^"]*)"')
 
 def check_kicad_symbol_file(filepath):
     errors = []
@@ -16,19 +20,14 @@ def check_kicad_symbol_file(filepath):
     if not os.path.exists(filepath):
         return [f"File not found: {filepath}"]
 
-    # Pre-compile regular expressions for performance
-    re_sym = re.compile(r'\(symbol "([^"]+)"')
-    re_sub_sym = re.compile(r'_[0-9]+_[0-9]+$')
-    re_prop = re.compile(r'\(property "([^"]+)" "([^"]*)"')
-
     with open(filepath, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f, 1):
             # Parse symbol declaration (matches: (symbol "SymbolName" ...)
-            sym_match = re_sym.search(line)
+            sym_match = SYM_PATTERN.search(line)
             if sym_match:
                 symbol_name = sym_match.group(1)
                 # Skip sub-symbols (units/graphic parts) which end in _[0-9]+_[0-9]+
-                if re_sub_sym.search(symbol_name):
+                if SUB_SYM_PATTERN.search(symbol_name):
                     continue
                 if current_symbol:
                     # Validate previous symbol fields before starting the new one
@@ -39,7 +38,7 @@ def check_kicad_symbol_file(filepath):
                 present_fields = set()
                 
             # Parse properties (matches: (property "PropertyName" "PropertyValue" ...)
-            prop_match = re_prop.search(line)
+            prop_match = PROP_PATTERN.search(line)
             if prop_match and current_symbol:
                 field_name = prop_match.group(1)
                 field_value = prop_match.group(2)
@@ -54,14 +53,13 @@ def check_kicad_symbol_file(filepath):
                 # Validate Category
                 if field_name == "Category":
                     if field_value not in ALLOWED_CATEGORIES:
-                        errors.append(f"Symbol '{current_symbol}' has invalid Category '{field_value}'. Must be one of: {', '.join(ALLOWED_CATEGORIES)}")
+                        errors.append(f"Symbol '{current_symbol}' has invalid Category '{field_value}'. Must be one of: {', '.join(sorted(ALLOWED_CATEGORIES))}")
 
                 # Validate Datasheet URL formatting
                 if field_name == "Datasheet":
                     if not (field_value.startswith("http://") or field_value.startswith("https://")):
                         errors.append(f"Symbol '{current_symbol}' has invalid Datasheet URL format: {field_value}")
                     elif not field_value.lower().endswith(".pdf"):
-                        # Keep it as a warning or error based on project standards
                         errors.append(f"Symbol '{current_symbol}' datasheet must be a PDF URL: {field_value}")
 
         # Check final symbol at the end of the file
@@ -80,12 +78,10 @@ if __name__ == "__main__":
         
     symbol_files = []
     for arg in sys.argv[1:]:
-        # Note: On Windows we might get raw wildcards, so glob them
         matched = glob.glob(arg)
         if matched:
             symbol_files.extend(matched)
         else:
-            # If no match (e.g. not a wildcard, just a file that doesn't exist yet), still add it to be checked
             symbol_files.append(arg)
             
     all_errors = []

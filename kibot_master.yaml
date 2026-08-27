@@ -2,17 +2,15 @@ kibot:
   version: 1
 
 preflight:
-  run_erc: false
-  run_drc: false
-  check_zone_fills: false
+  run_erc: true
+  run_drc: true
+  check_zone_fills: true
 
   check_fields:
     - field: 'MPN'
       severity: error
     - field: 'DigiKey'
       severity: error
-
-
 
 outputs:
   - name: 'schematic_pdf'
@@ -32,7 +30,7 @@ outputs:
     type: ibom
     options:
       output: 'Outputs/%f-iBOM.html'
-      # variant: 'variant_name' # Uncomment and replace to generate for a specific variant
+      # variant: 'variant_name' # Uncomment to generate for a specific variant
 
   - name: 'gerber_pack'
     comment: 'Gerbers and Drills for manufacturing'
@@ -48,7 +46,6 @@ outputs:
       format: XML
       output: 'Outputs/%f-BOM.xml'
 
-
 # --- How to use Design Variants in KiBot ---
 # To generate outputs for a specific design variant, define it here:
 # variants:
@@ -56,4 +53,3 @@ outputs:
 #     comment: 'Variant with higher current rating resistors populated'
 #     type: 'kibom'
 #     # In KiCad, add a custom field 'Config' to components with values like '+HighPower_Variant'
-

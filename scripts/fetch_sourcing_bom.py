@@ -2,6 +2,7 @@
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import os
 import sys
@@ -11,6 +12,9 @@ MOUSER_API_KEY = os.getenv("MOUSER_API_KEY")
 DIGIKEY_CLIENT_ID = os.getenv("DIGIKEY_CLIENT_ID")
 DIGIKEY_CLIENT_SECRET = os.getenv("DIGIKEY_CLIENT_SECRET")
 DIGIKEY_TOKEN_PATH = os.getenv("DIGIKEY_TOKEN_PATH", "digikey_token.json")
+
+# In-memory lookup cache to prevent redundant API queries
+API_CACHE = {}
 
 if not MOUSER_API_KEY and not DIGIKEY_CLIENT_ID:
     print("Warning: No sourcing API credentials (MOUSER_API_KEY or DIGIKEY_CLIENT_ID) defined in environment. Sourcing check will be skipped.", file=sys.stderr)
@@ -22,8 +26,12 @@ def parse_kicad_xml_bom(xml_path):
         print(f"Error: XML BOM file not found: {xml_path}", file=sys.stderr)
         return parts
 
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+    except Exception as e:
+        print(f"Error parsing XML BOM: {e}", file=sys.stderr)
+        return parts
     
     # KiCad XML structure: components -> comp
     for comp in root.iter('comp'):
@@ -36,7 +44,7 @@ def parse_kicad_xml_bom(xml_path):
                 name = field.attrib.get('name')
                 if name == 'MPN':
                     mpn = field.text
-                elif name == 'DigiKey':
+                elif name in ('DigiKey', 'DigiKey_SKU'):
                     digikey_pn = field.text
         
         key_mpn = mpn.strip() if mpn else None
@@ -65,11 +73,9 @@ def get_digikey_access_token():
             
     refresh_token = token_data.get("refresh_token") or os.getenv("DIGIKEY_REFRESH_TOKEN")
     if not refresh_token:
-        # Fallback to direct access token if available
         access_token = token_data.get("access_token") or os.getenv("DIGIKEY_ACCESS_TOKEN")
         if access_token:
             return access_token
-        print("Warning: DIGIKEY_REFRESH_TOKEN or stored token JSON not available.", file=sys.stderr)
         return None
         
     url = "https://api.digikey.com/v1/oauth2/token"
@@ -99,9 +105,13 @@ def get_digikey_access_token():
             except Exception as e:
                 print(f"Warning: Failed to save updated DigiKey token file: {e}", file=sys.stderr)
             return new_token_data["access_token"]
+    except urllib.error.HTTPError as e:
+        print(f"DigiKey OAuth refresh failed (HTTP {e.code}): {e.reason}", file=sys.stderr)
+        access_token = token_data.get("access_token") or os.getenv("DIGIKEY_ACCESS_TOKEN")
+        if access_token:
+            return access_token
     except Exception as e:
         print(f"Error refreshing DigiKey access token: {e}", file=sys.stderr)
-        # Fallback to current access token if available
         access_token = token_data.get("access_token") or os.getenv("DIGIKEY_ACCESS_TOKEN")
         if access_token:
             return access_token
@@ -109,7 +119,11 @@ def get_digikey_access_token():
     return None
 
 def query_digikey_part_data(mpn, digikey_pn=None):
-    """Programmatically fetch live pricing and stock levels from DigiKey API v4"""
+    """Fetch live pricing and stock levels from DigiKey API v4 with local caching"""
+    cache_key = f"digikey:{digikey_pn or mpn}"
+    if cache_key in API_CACHE:
+        return API_CACHE[cache_key]
+
     access_token = get_digikey_access_token()
     if not access_token:
         return None
@@ -160,20 +174,28 @@ def query_digikey_part_data(mpn, digikey_pn=None):
                 if pricing:
                     price = pricing[0].get("UnitPrice", "N/A")
                     
-                return {
+                result = {
                     "stock": prod.get("QuantityAvailable", 0),
                     "price_tier_1": price,
                     "status": status_str,
                     "datasheet": prod.get("PrimaryDatasheetUrl", "") or prod.get("DatasheetUrl", "")
                 }
+                API_CACHE[cache_key] = result
+                return result
+    except urllib.error.HTTPError as e:
+        print(f"DigiKey API HTTP error ({e.code}) for {query}: {e.reason}", file=sys.stderr)
     except Exception as e:
         print(f"Error executing DigiKey API call for {query}: {e}", file=sys.stderr)
         
     return None
 
 def query_mouser_part_data(mpn):
-    """Programmatically fetch live pricing and stock levels from Mouser API"""
-    if not MOUSER_API_KEY:
+    """Fetch live pricing and stock levels from Mouser API with local caching"""
+    cache_key = f"mouser:{mpn}"
+    if cache_key in API_CACHE:
+        return API_CACHE[cache_key]
+
+    if not MOUSER_API_KEY or not mpn:
         return None
         
     url = f"https://api.mouser.com/api/v1.0/search/partnumber?apiKey={MOUSER_API_KEY}"
@@ -201,12 +223,16 @@ def query_mouser_part_data(mpn):
                 if price_breaks:
                     price = price_breaks[0].get('Price', "N/A")
                     
-                return {
+                result = {
                     "stock": part.get('AvailabilityInStock', 0) or part.get('Availability', 0),
                     "price_tier_1": price,
                     "status": part.get('LifecycleStatus', 'Active') or "Active",
                     "datasheet": part.get('DatasheetUrl', '')
                 }
+                API_CACHE[cache_key] = result
+                return result
+    except urllib.error.HTTPError as e:
+        print(f"Mouser API HTTP error ({e.code}) for {mpn}: {e.reason}", file=sys.stderr)
     except Exception as e:
         print(f"Error executing Mouser API call for {mpn}: {e}", file=sys.stderr)
         
@@ -248,7 +274,7 @@ if __name__ == "__main__":
             sourcing = {"stock": "UNKNOWN", "price_tier_1": "UNKNOWN", "status": "UNKNOWN", "datasheet": ""}
             
         # Check lifecycle warnings
-        status = sourcing["status"]
+        status = sourcing.get("status", "UNKNOWN")
         if status in ["Obsolete", "End of Life", "EOL", "NRND", "Discontinued"]:
             part_display = part_digikey if part_digikey else part_mpn
             print(f"⚠️ CRITICAL WARNING: Part {part_display} used in {refs} is reported as {status}!", file=sys.stderr)
