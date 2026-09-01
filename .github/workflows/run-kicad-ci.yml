@@ -22,7 +22,12 @@ jobs:
   kicad-processing:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
     steps:
+
       - name: Checkout Board Repo
         uses: actions/checkout@v4
         with:
@@ -135,10 +140,38 @@ jobs:
             echo "Skipping sourcing check: XML BOM or sourcing API credentials not present."
           fi
 
+      - name: Generate Web Portal and Job Summary
+        if: steps.kicad_files.outputs.has_files == 'true'
+        run: |
+          python3 pcb-devops-tools/scripts/generate_portal_page.py Generated_Outputs "${{ github.repository }}" "${{ github.sha }}" "${{ github.ref_name }}"
+          
+          echo "## 🌊 Purdue ROV Hardware Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | Description | Format |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔬 **Interactive BOM** | Interactive component pad highlighter for soldering | HTML |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📄 **Schematic** | Multi-sheet vector schematic with nets and pinouts | PDF |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📐 **PCB Layout** | 2D layer trace and component placement plots | PDF |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📊 **Parts List** | Bill of Materials with MPN & DigiKey data | CSV |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.ref }}" = "refs/heads/master" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            REPO_OWNER="${{ github.repository_owner }}"
+            REPO_NAME="${{ github.event.repository.name }}"
+            echo "🌐 **Live GitHub Pages Portal:** [https://${REPO_OWNER}.github.io/${REPO_NAME}/](https://${REPO_OWNER}.github.io/${REPO_NAME}/)" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Upload Generated Artifacts
         if: steps.kicad_files.outputs.has_files == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: design-outputs
           path: Generated_Outputs/
+
+      - name: Deploy Interactive BOM to GitHub Pages
+        if: steps.kicad_files.outputs.has_files == 'true' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && github.event_name == 'push'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./Generated_Outputs
+          keep_files: false
+
 
