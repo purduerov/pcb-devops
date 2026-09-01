@@ -17,39 +17,30 @@ outputs:
     comment: 'Export schematic to PDF'
     type: pdf_sch_print
     options:
-      output: 'Outputs/%f-Schematic.pdf'
+      output: '%f-Schematic.pdf'
 
   - name: 'board_layout_pdf'
     comment: 'Export PCB layout to PDF'
     type: pcb_print
     options:
-      output: 'Outputs/%f-Layout.pdf'
+      output: '%f-Layout.pdf'
 
   - name: 'interactive_bom'
-    comment: 'Generate Interactive HTML BOM (excludes DNP components by default)'
+    comment: 'Generate Interactive HTML BOM'
     type: ibom
     options:
-      output: 'Outputs/%f-iBOM.html'
-      # variant: 'variant_name' # Uncomment to generate for a specific variant
+      output: '%f-iBOM.html'
 
-  - name: 'gerber_pack'
-    comment: 'Gerbers and Drills for manufacturing'
-    type: gerber
+  - name: 'bom_csv'
+    comment: 'Bill of Materials in CSV format'
+    type: bom
     options:
-      output: 'Outputs/%f-Gerbers.zip'
-      # exclude_plates_for_dnp: true # Uncomment to exclude DNP components from solder paste layers
+      format: CSV
+      output: '%f-BOM.csv'
 
   - name: 'bom_xml'
-    comment: 'Bill of Materials in XML format'
+    comment: 'Bill of Materials in XML format for sourcing validation'
     type: bom
     options:
       format: XML
-      output: 'Outputs/%f-BOM.xml'
-
-# --- How to use Design Variants in KiBot ---
-# To generate outputs for a specific design variant, define it here:
-# variants:
-#   - name: 'HighPower_Variant'
-#     comment: 'Variant with higher current rating resistors populated'
-#     type: 'kibom'
-#     # In KiCad, add a custom field 'Config' to components with values like '+HighPower_Variant'
+      output: '%f-BOM.xml'

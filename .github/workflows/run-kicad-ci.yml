@@ -119,5 +119,6 @@ jobs:
         if: steps.kicad_files.outputs.has_files == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: fabrication-files
+          name: design-outputs
           path: Generated_Outputs/
+
