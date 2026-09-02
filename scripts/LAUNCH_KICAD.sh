@@ -9,12 +9,23 @@ echo "⚙️ Configuring local Git hooks and filters..."
 git config core.hooksPath .githooks >/dev/null 2>&1 || true
 git config submodule.recurse true >/dev/null 2>&1 || true
 
-echo "🔄 Pulling latest board design updates..."
-git pull --rebase --autostash --quiet >/dev/null 2>&1 || true
+# Check internet connectivity
+IS_ONLINE=0
+if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || curl -s --head --connect-timeout 2 https://github.com >/dev/null 2>&1; then
+    IS_ONLINE=1
+fi
 
-echo "🔄 Auto-fetching latest Purdue ROV component library..."
-git -C libs/purdue-rov-kicad-lib pull origin master --quiet >/dev/null 2>&1 || true
-echo "✅ Everything up to date! Launching KiCad..."
+if [ "$IS_ONLINE" -eq 1 ]; then
+    echo "🔄 Pulling latest board design updates..."
+    git pull --rebase --autostash --quiet >/dev/null 2>&1 || true
+
+    echo "🔄 Auto-fetching latest Purdue ROV component library..."
+    git -C libs/purdue-rov-kicad-lib pull origin master --quiet >/dev/null 2>&1 || true
+else
+    echo "ℹ️ Offline mode: Skipping remote sync..."
+fi
+
+echo "✅ Everything ready! Launching KiCad..."
 
 # Find the first .kicad_pro project file
 PROJ=""
