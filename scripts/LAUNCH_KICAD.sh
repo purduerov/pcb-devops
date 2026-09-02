@@ -6,14 +6,14 @@ TARGET_DIR="${1:-$(pwd)}"
 cd "$TARGET_DIR"
 
 echo "⚙️ Configuring local Git hooks and filters..."
-git config core.hooksPath .githooks
-git config submodule.recurse true
+git config core.hooksPath .githooks >/dev/null 2>&1 || true
+git config submodule.recurse true >/dev/null 2>&1 || true
 
 echo "🔄 Pulling latest board design updates..."
-git pull --rebase --autostash --quiet || true
+git pull --rebase --autostash --quiet >/dev/null 2>&1 || true
 
 echo "🔄 Auto-fetching latest Purdue ROV component library..."
-git -C libs/purdue-rov-kicad-lib pull origin master --quiet || true
+git -C libs/purdue-rov-kicad-lib pull origin master --quiet >/dev/null 2>&1 || true
 echo "✅ Everything up to date! Launching KiCad..."
 
 # Find the first .kicad_pro project file
@@ -55,8 +55,11 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "linux"* ]]; then
     elif command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$PROJ" &
     else
-        echo "⚠️  Could not automatically launch KiCad."
-        echo "Please open '$PROJ' directly in KiCad."
+        echo ""
+        echo "==========================================================="
+        echo "⚠️  KiCad EDA was not found in your standard PATH or Flatpak."
+        echo "👉 Please install KiCad: https://kicad.org/download/"
+        echo "==========================================================="
     fi
 else
     # Fallback / Windows Git Bash / Cygwin

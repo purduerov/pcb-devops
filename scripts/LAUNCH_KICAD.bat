@@ -6,14 +6,14 @@ if not "%~1"=="" (
 )
 
 echo ⚙️ Configuring local Git hooks and filters...
-git config core.hooksPath .githooks
-git config submodule.recurse true
+git config core.hooksPath .githooks >nul 2>&1
+git config submodule.recurse true >nul 2>&1
 
 echo 🔄 Pulling latest board design updates...
-git pull --rebase --autostash --quiet
+git pull --rebase --autostash --quiet >nul 2>&1
 
 echo 🔄 Auto-fetching latest Purdue ROV component library...
-git -C libs/purdue-rov-kicad-lib pull origin master --quiet
+git -C libs/purdue-rov-kicad-lib pull origin master --quiet >nul 2>&1
 
 echo ✅ Everything up to date! Launching KiCad...
 for %%f in (*.kicad_pro) do (
@@ -21,4 +21,8 @@ for %%f in (*.kicad_pro) do (
     exit /b 0
 )
 
-echo ⚠️ No .kicad_pro project file found in this directory.
+echo.
+echo ===========================================================
+echo ⚠️ No .kicad_pro project file found in this directory!
+echo ===========================================================
+pause
