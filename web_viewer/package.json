@@ -1,0 +1,13 @@
+{
+  "name": "purdue-rov-web-viewer",
+  "version": "1.0.0",
+  "description": "Secure local KiCanvas CAD design review viewer and GitHub asset proxy",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "express": "^4.21.2"
+  }
+}

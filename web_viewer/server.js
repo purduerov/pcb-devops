@@ -26,7 +26,7 @@ app.get('/api/fetch-private-cad', async (req, res) => {
     }
 
     // Sanitize filename to prevent directory traversal
-    if (filename.includes('..') || filename.startsWith('/')) {
+    if (filename.includes('..') || filename.startsWith('/') || filename.includes('\\') || path.isAbsolute(filename)) {
         return res.status(400).send("Bad Request: Invalid filename.");
     }
 
