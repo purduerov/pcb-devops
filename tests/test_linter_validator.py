@@ -143,5 +143,53 @@ class TestLinterValidator(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("invalid Category 'InvalidCategory'", errors[0])
 
+    def test_directory_argument_handling(self):
+        # Passing a directory containing symbols should scan them without throwing PermissionError
+        content = """(kicad_symbol_lib
+  (symbol "TestSymbol"
+    (property "MPN" "12345")
+    (property "Manufacturer" "TestCorp")
+    (property "Datasheet" "https://example.com/data.pdf")
+    (property "Temp_Range" "-40 to 85")
+    (property "DigiKey" "123-456-ND")
+    (property "Category" "Passives")
+  )
+)"""
+        self.create_temp_file(content)
+        errors = check_kicad_symbol_file(self.temp_dir.name)
+        self.assertEqual(len(errors), 0)
+
+    def test_datasheet_url_with_query_params(self):
+        content = """(kicad_symbol_lib
+  (symbol "TestSymbol"
+    (property "MPN" "12345")
+    (property "Manufacturer" "TestCorp")
+    (property "Datasheet" "https://example.com/doc.pdf?download=true&ts=123")
+    (property "Temp_Range" "-40 to 85")
+    (property "DigiKey" "123-456-ND")
+    (property "Category" "Passives")
+  )
+)"""
+        filepath = self.create_temp_file(content)
+        errors = check_kicad_symbol_file(filepath)
+        self.assertEqual(len(errors), 0)
+
+    def test_empty_datasheet_field_single_error(self):
+        content = """(kicad_symbol_lib
+  (symbol "TestSymbol"
+    (property "MPN" "12345")
+    (property "Manufacturer" "TestCorp")
+    (property "Datasheet" "")
+    (property "Temp_Range" "-40 to 85")
+    (property "DigiKey" "123-456-ND")
+    (property "Category" "Passives")
+  )
+)"""
+        filepath = self.create_temp_file(content)
+        errors = check_kicad_symbol_file(filepath)
+        # Should only report missing field, not format error or not-a-pdf error
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing mandatory field: Datasheet", errors[0])
+
 if __name__ == '__main__':
     unittest.main()

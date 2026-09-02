@@ -2,6 +2,8 @@
 import sys
 import re
 import os
+import urllib.parse
+import glob
 
 # Mandatory fields that must be present in every component symbol
 MANDATORY_FIELDS = {"MPN", "Manufacturer", "Datasheet", "Temp_Range", "DigiKey", "Category"}
@@ -14,11 +16,22 @@ PROP_PATTERN = re.compile(r'\(property "([^"]+)" "([^"]*)"')
 
 def check_kicad_symbol_file(filepath):
     errors = []
-    current_symbol = None
-    present_fields = set()
     
     if not os.path.exists(filepath):
         return [f"File not found: {filepath}"]
+
+    # If a directory is passed, recursively scan all .kicad_sym files inside it
+    if os.path.isdir(filepath):
+        dir_errors = []
+        for root, _, files in os.walk(filepath):
+            for file in sorted(files):
+                if file.endswith(".kicad_sym"):
+                    subpath = os.path.join(root, file)
+                    dir_errors.extend(check_kicad_symbol_file(subpath))
+        return dir_errors
+
+    current_symbol = None
+    present_fields = set()
 
     with open(filepath, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f, 1):
@@ -56,10 +69,11 @@ def check_kicad_symbol_file(filepath):
                         errors.append(f"Symbol '{current_symbol}' has invalid Category '{field_value}'. Must be one of: {', '.join(sorted(ALLOWED_CATEGORIES))}")
 
                 # Validate Datasheet URL formatting
-                if field_name == "Datasheet":
-                    if not (field_value.startswith("http://") or field_value.startswith("https://")):
+                if field_name == "Datasheet" and field_value.strip():
+                    parsed_url = urllib.parse.urlparse(field_value.strip())
+                    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
                         errors.append(f"Symbol '{current_symbol}' has invalid Datasheet URL format: {field_value}")
-                    elif not field_value.lower().endswith(".pdf"):
+                    elif not parsed_url.path.lower().endswith(".pdf") and not field_value.lower().endswith(".pdf"):
                         errors.append(f"Symbol '{current_symbol}' datasheet must be a PDF URL: {field_value}")
 
         # Check final symbol at the end of the file
@@ -71,18 +85,22 @@ def check_kicad_symbol_file(filepath):
     return errors
 
 if __name__ == "__main__":
-    import glob
     if len(sys.argv) < 2:
-        print("Usage: ./linter_validator.py <symbols.kicad_sym> [...]")
+        print("Usage: ./linter_validator.py <symbols.kicad_sym | directory> [...]")
         sys.exit(1)
         
     symbol_files = []
     for arg in sys.argv[1:]:
         matched = glob.glob(arg)
-        if matched:
-            symbol_files.extend(matched)
-        else:
-            symbol_files.append(arg)
+        targets = matched if matched else [arg]
+        for target in targets:
+            if os.path.isdir(target):
+                for root, _, files in os.walk(target):
+                    for file in sorted(files):
+                        if file.endswith(".kicad_sym"):
+                            symbol_files.append(os.path.join(root, file))
+            else:
+                symbol_files.append(target)
             
     all_errors = []
     for symbols_file in symbol_files:
