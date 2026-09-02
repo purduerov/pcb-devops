@@ -1,7 +1,10 @@
 import unittest
 import tempfile
 import os
-from scripts.linter_validator import check_kicad_symbol_file
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
+from linter_validator import check_kicad_symbol_file
 
 class TestLinterValidator(unittest.TestCase):
     def setUp(self):
@@ -142,4 +145,3 @@ class TestLinterValidator(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

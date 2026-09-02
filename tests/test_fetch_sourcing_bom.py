@@ -1,9 +1,12 @@
+import io
 import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch, mock_open
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
+import fetch_sourcing_bom
 from fetch_sourcing_bom import parse_kicad_xml_bom
 
 class TestFetchSourcingBom(unittest.TestCase):
@@ -76,6 +79,23 @@ class TestFetchSourcingBom(unittest.TestCase):
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    @patch('fetch_sourcing_bom.DIGIKEY_CLIENT_ID', 'dummy_client_id')
+    @patch('fetch_sourcing_bom.DIGIKEY_CLIENT_SECRET', 'dummy_client_secret')
+    @patch('fetch_sourcing_bom.DIGIKEY_TOKEN_PATH', 'dummy_token.json')
+    @patch('os.path.exists')
+    def test_get_digikey_access_token_json_error(self, mock_exists):
+        mock_exists.return_value = True
+        invalid_json_data = "{invalid_json: true"
+
+        captured_stderr = io.StringIO()
+        with patch('builtins.open', mock_open(read_data=invalid_json_data)):
+            with patch('sys.stderr', captured_stderr):
+                with patch('os.getenv', return_value=None):
+                    result = fetch_sourcing_bom.get_digikey_access_token()
+
+        self.assertIsNone(result)
+        self.assertIn("Warning: Failed to load DigiKey token file", captured_stderr.getvalue())
 
 if __name__ == '__main__':
     unittest.main()
