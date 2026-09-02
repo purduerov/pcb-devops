@@ -97,5 +97,32 @@ class TestFetchSourcingBom(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("Warning: Failed to load DigiKey token file", captured_stderr.getvalue())
 
+    @patch('urllib.request.urlopen')
+    @patch('fetch_sourcing_bom.get_digikey_access_token', return_value='test_token')
+    @patch('fetch_sourcing_bom.DIGIKEY_CLIENT_ID', 'dummy_client')
+    def test_digikey_request_timeout(self, mock_get_token, mock_urlopen):
+        mock_response = unittest.mock.MagicMock()
+        mock_response.read.return_value = b'{"Products": []}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        fetch_sourcing_bom.query_digikey_part_data("RES-10K")
+        self.assertTrue(mock_urlopen.called)
+        _, kwargs = mock_urlopen.call_args
+        self.assertIn('timeout', kwargs)
+        self.assertEqual(kwargs['timeout'], 10)
+
+    @patch('urllib.request.urlopen')
+    @patch('fetch_sourcing_bom.MOUSER_API_KEY', 'dummy_key')
+    def test_mouser_request_timeout(self, mock_urlopen):
+        mock_response = unittest.mock.MagicMock()
+        mock_response.read.return_value = b'{"SearchResults": {"Parts": []}}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        fetch_sourcing_bom.query_mouser_part_data("RES-10K")
+        self.assertTrue(mock_urlopen.called)
+        _, kwargs = mock_urlopen.call_args
+        self.assertIn('timeout', kwargs)
+        self.assertEqual(kwargs['timeout'], 10)
+
 if __name__ == '__main__':
     unittest.main()

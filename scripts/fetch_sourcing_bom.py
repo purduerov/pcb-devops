@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-import xml.etree.ElementTree as ET
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
+
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -12,12 +16,14 @@ MOUSER_API_KEY = os.getenv("MOUSER_API_KEY")
 DIGIKEY_CLIENT_ID = os.getenv("DIGIKEY_CLIENT_ID")
 DIGIKEY_CLIENT_SECRET = os.getenv("DIGIKEY_CLIENT_SECRET")
 DIGIKEY_TOKEN_PATH = os.getenv("DIGIKEY_TOKEN_PATH", "digikey_token.json")
+API_TIMEOUT = int(os.getenv("SOURCING_API_TIMEOUT", "10"))
 
 # In-memory lookup cache to prevent redundant API queries
 API_CACHE = {}
 
-if not MOUSER_API_KEY and not DIGIKEY_CLIENT_ID:
-    print("Warning: No sourcing API credentials (MOUSER_API_KEY or DIGIKEY_CLIENT_ID) defined in environment. Sourcing check will be skipped.", file=sys.stderr)
+def warn_missing_credentials():
+    if not MOUSER_API_KEY and not DIGIKEY_CLIENT_ID:
+        print("Warning: No sourcing API credentials (MOUSER_API_KEY or DIGIKEY_CLIENT_ID) defined in environment. Sourcing check will be skipped.", file=sys.stderr)
 
 def parse_kicad_xml_bom(xml_path):
     """Extract MPN, DigiKey part number, and designators from KiCad XML Bill of Materials"""
@@ -93,7 +99,7 @@ def get_digikey_access_token():
     )
     
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             new_token_data = {
                 "access_token": res_data.get("access_token"),
@@ -158,7 +164,7 @@ def query_digikey_part_data(mpn, digikey_pn=None):
     )
     
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             products = res_data.get("Products", [])
             if products:
@@ -213,7 +219,7 @@ def query_mouser_part_data(mpn):
     )
     
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             results = res_data.get('SearchResults', {}).get('Parts', [])
             if results:
@@ -239,11 +245,16 @@ def query_mouser_part_data(mpn):
     return None
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: ./fetch_sourcing_bom.py <kicad_bom.xml>")
+    fail_on_obsolete = "--fail-on-obsolete" in sys.argv or "--strict" in sys.argv
+    positional_args = [arg for arg in sys.argv[1:] if arg not in ("--fail-on-obsolete", "--strict")]
+
+    if not positional_args:
+        print("Usage: ./fetch_sourcing_bom.py [--fail-on-obsolete] <kicad_bom.xml>")
         sys.exit(1)
+
+    warn_missing_credentials()
         
-    xml_bom_file = sys.argv[1]
+    xml_bom_file = positional_args[0]
     bom_parts = parse_kicad_xml_bom(xml_bom_file)
     
     print("MPN,DigiKey_PN,Quantity,Designators,Stock,Unit_Cost,Lifecycle,Source")
@@ -284,3 +295,5 @@ if __name__ == "__main__":
         
     if has_obsolete:
         print("\nSourcing warning: One or more components are End of Life / Obsolete.", file=sys.stderr)
+        if fail_on_obsolete:
+            sys.exit(1)
