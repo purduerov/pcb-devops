@@ -38,17 +38,22 @@ for BOARD_DIR in "$PARENT_DIR"/*; do
             
             git pull origin master --ff-only --quiet || true
             
-            echo "  Merging template/master..."
-            if ! git merge template/master --allow-unrelated-histories -m "chore: sync latest infrastructure updates from board-template" --quiet; then
-                echo "  Merge conflict encountered in $BOARD_NAME. Aborting merge..."
-                git merge --abort || true
-                continue
+            echo "  Syncing infrastructure files from template/master..."
+            git checkout template/master -- LAUNCH_KICAD.bat LAUNCH_KICAD.sh .githooks .github/workflows/ci.yml custom_rules.kicad_dru .gitattributes .gitignore 2>/dev/null || true
+            
+            if ! git diff --cached --quiet; then
+                git commit -m "chore(infra): sync latest infrastructure tooling from board-template" --quiet
+                echo "  Committed infrastructure updates."
+            else
+                echo "  Infrastructure already up to date."
             fi
             
             if [ -d "libs/purdue-rov-kicad-lib" ]; then
                 git -C libs/purdue-rov-kicad-lib pull origin master --quiet || true
                 git add libs/purdue-rov-kicad-lib || true
-                git commit -m "chore(submodule): sync purdue-rov-kicad-lib to latest master" --quiet 2>/dev/null || true
+                if ! git diff --cached --quiet; then
+                    git commit -m "chore(submodule): sync purdue-rov-kicad-lib to latest master" --quiet 2>/dev/null || true
+                fi
             fi
             
             echo "  Pushing updates to origin/master..."

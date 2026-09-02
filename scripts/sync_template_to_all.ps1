@@ -61,21 +61,29 @@ foreach ($BoardDir in $TargetBoardDirs) {
         # 3. Pull latest origin first
         git pull origin master --ff-only --quiet 2>$null
 
-        # 4. Merge template changes
-        Write-Host "  Merging template/master..." -ForegroundColor Gray
-        $MergeOutput = git merge template/master --allow-unrelated-histories -m "chore: sync latest infrastructure updates from board-template" 2>&1
+        # 4. Selectively sync infrastructure files from template/master
+        Write-Host "  Syncing infrastructure files from template/master..." -ForegroundColor Gray
+        $infraFiles = @("LAUNCH_KICAD.bat", "LAUNCH_KICAD.sh", ".githooks", ".github/workflows/ci.yml", "custom_rules.kicad_dru", ".gitattributes", ".gitignore")
         
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Merge conflict encountered in ${BoardName}. Aborting merge..." -ForegroundColor Red
-            git merge --abort 2>$null
-            continue
+        git checkout template/master -- $infraFiles 2>$null
+        
+        # Check if any changes were staged
+        $staged = git diff --cached --name-only
+        if ($staged) {
+            git commit -m "chore(infra): sync latest infrastructure tooling from board-template" 2>$null
+            Write-Host "  Committed infrastructure updates." -ForegroundColor Gray
+        } else {
+            Write-Host "  Infrastructure already up to date." -ForegroundColor Gray
         }
 
         # 5. Sync submodule if present
         if (Test-Path "libs/purdue-rov-kicad-lib") {
             git -C libs/purdue-rov-kicad-lib pull origin master --quiet 2>$null
             git add libs/purdue-rov-kicad-lib 2>$null
-            git commit -m "chore(submodule): sync purdue-rov-kicad-lib to latest master" 2>$null
+            $submoduleStaged = git diff --cached --name-only
+            if ($submoduleStaged) {
+                git commit -m "chore(submodule): sync purdue-rov-kicad-lib to latest master" 2>$null
+            }
         }
         
         # 6. Push updates to remote master
