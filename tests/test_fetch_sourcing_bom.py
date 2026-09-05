@@ -29,6 +29,35 @@ class TestFetchSourcingBom(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_parse_kicad_xml_bom_xxe_blocked(self):
+        xxe_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ELEMENT foo ANY >
+  <!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
+<export version="D">
+  <components>
+    <comp ref="&xxe;">
+      <fields>
+        <field name="MPN">TEST-MPN</field>
+      </fields>
+    </comp>
+  </components>
+</export>
+"""
+        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.xml') as tf:
+            tf.write(xxe_xml)
+            tf_path = tf.name
+
+        captured_stderr = io.StringIO()
+        try:
+            with patch('sys.stderr', captured_stderr):
+                parts = parse_kicad_xml_bom(tf_path)
+            self.assertEqual(parts, {})
+            self.assertIn("Error parsing XML BOM", captured_stderr.getvalue())
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
     def test_standard_extraction(self):
         xml_content = """<?xml version="1.0" encoding="utf-8"?>
 <export version="D">
