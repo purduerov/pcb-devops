@@ -3,8 +3,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="${1:-$(pwd)}"
-cd "$TARGET_DIR"
+if [ -n "$1" ]; then
+    cd "$1"
+fi
+TARGET_DIR="$(pwd)"
 
 echo ""
 echo "============================================================"
