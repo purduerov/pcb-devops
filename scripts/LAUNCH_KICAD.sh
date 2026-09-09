@@ -2,32 +2,70 @@
 # Master KiCad Launcher for Purdue ROV Boards (macOS / Linux)
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${1:-$(pwd)}"
 cd "$TARGET_DIR"
 
-echo "⚙️ Configuring local Git hooks and filters..."
+echo ""
+echo "============================================================"
+echo "  🚀 Purdue ROV - KiCad Launch & Sync System"
+echo "============================================================"
+echo ""
+
+# 1. Git hooks & submodule configuration
+echo "[1/5] ⚙️  Configuring Git environment..."
 git config core.hooksPath .githooks >/dev/null 2>&1 || true
 git config submodule.recurse true >/dev/null 2>&1 || true
 
-# Check internet connectivity
+# 2. Check internet connectivity (fast ping/curl)
 IS_ONLINE=0
 if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || curl -s --head --connect-timeout 2 https://github.com >/dev/null 2>&1; then
     IS_ONLINE=1
 fi
 
+# 3. Pull & Sync
 if [ "$IS_ONLINE" -eq 1 ]; then
-    echo "🔄 Pulling latest board design updates..."
-    git pull --rebase --autostash --quiet >/dev/null 2>&1 || true
+    echo "[2/5] 📥 Pulling latest board design updates..."
+    if git pull --rebase --autostash --quiet >/dev/null 2>&1; then
+        echo "     ✅ Board repository up to date."
+    else
+        echo "     ⚠️  Note: Could not automatically rebase board updates (check local changes)."
+    fi
 
-    echo "🔄 Auto-fetching latest Purdue ROV component library..."
-    git -C libs/purdue-rov-kicad-lib pull origin master --quiet >/dev/null 2>&1 || true
+    echo "[3/5] 📚 Updating Purdue ROV component library (submodule)..."
+    git submodule sync --quiet >/dev/null 2>&1 || true
+    git submodule update --init --recursive --quiet >/dev/null 2>&1 || true
+    if [ -d "libs/purdue-rov-kicad-lib" ]; then
+        git -C libs/purdue-rov-kicad-lib config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
+        git -C libs/purdue-rov-kicad-lib fetch origin master --quiet >/dev/null 2>&1 || true
+        git -C libs/purdue-rov-kicad-lib checkout master --quiet >/dev/null 2>&1 || true
+        git -C libs/purdue-rov-kicad-lib pull origin master --ff-only --quiet >/dev/null 2>&1 || true
+        echo "     ✅ Component library updated to latest master."
+    else
+        echo "     ℹ️  No submodule found at libs/purdue-rov-kicad-lib."
+    fi
 else
-    echo "ℹ️ Offline mode: Skipping remote sync..."
+    echo "[2/5] 🌐 Offline mode detected: Skipping remote sync."
+    echo "[3/5] 📦 Checking local library submodule..."
+    git submodule sync --quiet >/dev/null 2>&1 || true
+    git submodule update --init --recursive --quiet >/dev/null 2>&1 || true
 fi
 
-echo "✅ Everything ready! Launching KiCad..."
+# 4. Verify & Synchronize sym-lib-table and fp-lib-table
+echo "[4/5] 🔧 Verifying KiCad symbol and footprint library tables..."
+SYNC_SCRIPT="$SCRIPT_DIR/sync_project_libs.py"
+if [ -f "$SYNC_SCRIPT" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$SYNC_SCRIPT" "$TARGET_DIR" || true
+    elif command -v python >/dev/null 2>&1; then
+        python "$SYNC_SCRIPT" "$TARGET_DIR" || true
+    else
+        echo "     ℹ️  Python not found; skipping automated library table check."
+    fi
+fi
 
-# Find the first .kicad_pro project file
+# 5. Locate and Launch KiCad Project
+echo "[5/5] 🚀 Launching KiCad..."
 PROJ=""
 for f in *.kicad_pro; do
     if [ -f "$f" ]; then
@@ -37,13 +75,19 @@ for f in *.kicad_pro; do
 done
 
 if [ -z "$PROJ" ]; then
-    echo "⚠️  No .kicad_pro project file found in $TARGET_DIR."
+    echo ""
+    echo "==========================================================="
+    echo "⚠️  No .kicad_pro project file found in $TARGET_DIR!"
+    echo "==========================================================="
     exit 1
 fi
 
+echo "     Opening: $PROJ"
+echo ""
+
 # Detect OS and launch KiCad appropriately
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS: Check standard KiCad application bundle locations or use default system handler
+    # macOS: Check standard KiCad application bundle locations
     if [ -d "/Applications/KiCad/KiCad.app" ]; then
         open -a "/Applications/KiCad/KiCad.app" "$PROJ"
     elif [ -d "/Applications/KiCad.app" ]; then
@@ -66,11 +110,8 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "linux"* ]]; then
     elif command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$PROJ" &
     else
-        echo ""
-        echo "==========================================================="
         echo "⚠️  KiCad EDA was not found in your standard PATH or Flatpak."
         echo "👉 Please install KiCad: https://kicad.org/download/"
-        echo "==========================================================="
     fi
 else
     # Fallback / Windows Git Bash / Cygwin
