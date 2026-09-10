@@ -28,10 +28,10 @@ fi
 # 3. Pull & Sync
 if [ "$IS_ONLINE" -eq 1 ]; then
     echo "[2/5] 📥 Pulling latest board design updates..."
-    if git pull --rebase --autostash --quiet >/dev/null 2>&1; then
+    if git pull --rebase --autostash --quiet >/dev/null 2>&1 || git pull --no-rebase --quiet >/dev/null 2>&1; then
         echo "     ✅ Board repository up to date."
     else
-        echo "     ⚠️  Note: Could not automatically rebase board updates (check local changes)."
+        echo "     ⚠️  Note: Could not automatically pull board updates (check local changes)."
     fi
 
     echo "[3/5] 📚 Updating Purdue ROV component library (submodule)..."

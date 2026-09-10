@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul 2>&1
 title Purdue ROV - KiCad Launch System
 
@@ -33,8 +33,9 @@ if "%IS_ONLINE%"=="0" goto :offline_sync
 
 echo [2/5] 📥 Pulling latest board design updates...
 git pull --rebase --autostash --quiet >nul 2>&1
+if %ERRORLEVEL% NEQ 0 git pull --no-rebase --quiet >nul 2>&1
 if %ERRORLEVEL% EQU 0 echo      ✅ Board repository up to date.
-if %ERRORLEVEL% NEQ 0 echo      ⚠️  Note: Could not rebase board updates - check local changes.
+if %ERRORLEVEL% NEQ 0 echo      ⚠️  Note: Could not pull board updates - check local changes.
 
 echo [3/5] 📚 Updating Purdue ROV component library submodule...
 git submodule sync --quiet >nul 2>&1
