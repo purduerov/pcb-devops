@@ -63,7 +63,7 @@ foreach ($BoardDir in $TargetBoardDirs) {
 
         # 4. Selectively sync infrastructure files from template/master
         Write-Host "  Syncing infrastructure files from template/master..." -ForegroundColor Gray
-        $infraFiles = @("LAUNCH_KICAD.bat", "LAUNCH_KICAD.sh", ".githooks", ".github/workflows/ci.yml", "custom_rules.kicad_dru", ".gitattributes", ".gitignore")
+        $infraFiles = @("LAUNCH_KICAD.bat", "LAUNCH_KICAD.sh", ".githooks", ".github/workflows/ci.yml", "custom_rules.kicad_dru", ".gitattributes", ".gitignore", ".gitmodules")
         
         git checkout template/master -- $infraFiles 2>$null
         

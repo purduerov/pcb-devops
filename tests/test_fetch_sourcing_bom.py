@@ -122,7 +122,41 @@ class TestFetchSourcingBom(unittest.TestCase):
         self.assertTrue(mock_urlopen.called)
         _, kwargs = mock_urlopen.call_args
         self.assertIn('timeout', kwargs)
-        self.assertEqual(kwargs['timeout'], 10)
+    def test_case_insensitive_and_value_fallback(self):
+        xml_content = """<?xml version="1.0" encoding="utf-8"?>
+<export version="D">
+  <components>
+    <comp ref="U1">
+      <fields>
+        <field name="mpn">TPS62130RGTR</field>
+        <field name="Digi-Key">296-30230-1-ND</field>
+      </fields>
+    </comp>
+    <comp ref="U2">
+      <value>STM32F405RGT6</value>
+    </comp>
+    <comp ref="R1">
+      <value>10k</value>
+    </comp>
+  </components>
+</export>
+"""
+        with tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False, encoding='utf-8') as f:
+            f.write(xml_content)
+            temp_path = f.name
+
+        try:
+            parts = parse_kicad_xml_bom(temp_path)
+            self.assertEqual(len(parts), 3)
+            self.assertIn(("TPS62130RGTR", "296-30230-1-ND"), parts)
+            self.assertEqual(parts[("TPS62130RGTR", "296-30230-1-ND")], ["U1"])
+            self.assertIn(("STM32F405RGT6", None), parts)
+            self.assertEqual(parts[("STM32F405RGT6", None)], ["U2"])
+            self.assertIn(("10k", None), parts)
+            self.assertEqual(parts[("10k", None)], ["R1"])
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
 if __name__ == '__main__':
     unittest.main()

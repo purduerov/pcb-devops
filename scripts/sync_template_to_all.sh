@@ -39,7 +39,7 @@ for BOARD_DIR in "$PARENT_DIR"/*; do
             git pull origin master --ff-only --quiet || true
             
             echo "  Syncing infrastructure files from template/master..."
-            git checkout template/master -- LAUNCH_KICAD.bat LAUNCH_KICAD.sh .githooks .github/workflows/ci.yml custom_rules.kicad_dru .gitattributes .gitignore 2>/dev/null || true
+            git checkout template/master -- LAUNCH_KICAD.bat LAUNCH_KICAD.sh .githooks .github/workflows/ci.yml custom_rules.kicad_dru .gitattributes .gitignore .gitmodules 2>/dev/null || true
             
             if ! git diff --cached --quiet; then
                 git commit -m "chore(infra): sync latest infrastructure tooling from board-template" --quiet

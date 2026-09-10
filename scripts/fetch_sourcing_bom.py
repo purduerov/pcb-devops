@@ -47,11 +47,24 @@ def parse_kicad_xml_bom(xml_path):
         digikey_pn = None
         if fields is not None:
             for field in fields.iter('field'):
-                name = field.attrib.get('name')
-                if name == 'MPN':
-                    mpn = field.text
-                elif name in ('DigiKey', 'DigiKey_SKU'):
-                    digikey_pn = field.text
+                name_clean = (field.attrib.get('name') or '').strip().lower()
+                val = (field.text or '').strip()
+                if not val:
+                    continue
+                if name_clean in ('mpn', 'mfr_pn', 'mfr part #', 'mfr_part_#', 'part number', 'partnumber', 'manufacturer part number'):
+                    if not mpn:
+                        mpn = val
+                elif name_clean in ('digikey', 'digikey_sku', 'digi-key', 'digi-key_sku', 'digi-key part number', 'digikey part number', 'dk_part_number'):
+                    if not digikey_pn:
+                        digikey_pn = val
+        
+        # Fallback to <value> if MPN not explicitly defined in fields
+        if not mpn:
+            val_elem = comp.find('value')
+            if val_elem is not None and val_elem.text:
+                val_text = val_elem.text.strip()
+                if val_text and val_text.upper() not in ('R', 'C', 'L', 'D', 'Q', 'U', 'DEVICE') and not val_text.startswith('~'):
+                    mpn = val_text
         
         key_mpn = mpn.strip() if mpn else None
         key_digikey = digikey_pn.strip() if digikey_pn else None

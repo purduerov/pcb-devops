@@ -25,7 +25,7 @@ jobs:
 
       - name: Compile Python Scripts
         run: |
-          python3 -m py_compile scripts/fetch_sourcing_bom.py scripts/linter_validator.py scripts/generate_portal_page.py
+          python3 -m py_compile scripts/fetch_sourcing_bom.py scripts/linter_validator.py scripts/generate_portal_page.py scripts/sync_project_libs.py
 
       - name: Validate YAML Syntax
         run: |
