@@ -144,6 +144,7 @@ jobs:
       - name: Generate Web Portal and Job Summary
         if: steps.kicad_files.outputs.has_files == 'true'
         run: |
+          sudo chown -R $USER:$USER Generated_Outputs
           python3 pcb-devops-tools/scripts/generate_portal_page.py Generated_Outputs "${{ github.repository }}" "${{ github.sha }}" "${{ github.ref_name }}"
           
           echo "## 🌊 Purdue ROV Hardware Artifacts" >> $GITHUB_STEP_SUMMARY
