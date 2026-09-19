@@ -19,9 +19,11 @@ echo "[1/5] ⚙️  Configuring Git environment..."
 git config core.hooksPath .githooks >/dev/null 2>&1 || true
 git config submodule.recurse true >/dev/null 2>&1 || true
 
-# 2. Check internet connectivity (fast ping/curl)
+# 2. Check internet connectivity (robust across macOS and Linux)
 IS_ONLINE=0
-if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || curl -s --head --connect-timeout 2 https://github.com >/dev/null 2>&1; then
+if curl -s --head --connect-timeout 3 https://github.com >/dev/null 2>&1; then
+    IS_ONLINE=1
+elif ping -c 1 8.8.8.8 >/dev/null 2>&1; then
     IS_ONLINE=1
 fi
 
@@ -40,8 +42,8 @@ if [ "$IS_ONLINE" -eq 1 ]; then
     if [ -d "libs/purdue-rov-kicad-lib" ]; then
         git -C libs/purdue-rov-kicad-lib config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
         git -C libs/purdue-rov-kicad-lib fetch origin master --quiet >/dev/null 2>&1 || true
-        git -C libs/purdue-rov-kicad-lib checkout master --quiet >/dev/null 2>&1 || true
-        git -C libs/purdue-rov-kicad-lib pull origin master --ff-only --quiet >/dev/null 2>&1 || true
+        git -C libs/purdue-rov-kicad-lib checkout -B master origin/master --quiet >/dev/null 2>&1 || true
+        git -C libs/purdue-rov-kicad-lib reset --hard origin/master --quiet >/dev/null 2>&1 || true
         echo "     ✅ Component library updated to latest master."
     else
         echo "     ℹ️  No submodule found at libs/purdue-rov-kicad-lib."

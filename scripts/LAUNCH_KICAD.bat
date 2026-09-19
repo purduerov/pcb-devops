@@ -45,10 +45,11 @@ if not exist "libs\purdue-rov-kicad-lib" goto :sync_tables
 
 git -C libs/purdue-rov-kicad-lib config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >nul 2>&1
 git -C libs/purdue-rov-kicad-lib fetch origin master --quiet >nul 2>&1
-git -C libs/purdue-rov-kicad-lib checkout master --quiet >nul 2>&1
-git -C libs/purdue-rov-kicad-lib pull origin master --ff-only --quiet >nul 2>&1
+git -C libs/purdue-rov-kicad-lib checkout -B master origin/master --quiet >nul 2>&1
+git -C libs/purdue-rov-kicad-lib reset --hard origin/master --quiet >nul 2>&1
 echo      ✅ Component library updated to latest master.
 goto :sync_tables
+
 
 :offline_sync
 echo [2/5] 🌐 Offline mode: Skipping board remote sync.
