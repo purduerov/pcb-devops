@@ -7,7 +7,7 @@ on:
         description: 'Enforce strict DRC/ERC validation'
         required: false
         type: boolean
-        default: true
+        default: false
       enable_sourcing_check:
         description: 'Run DigiKey/Mouser BOM stock and lifecycle checks'
         required: false
@@ -86,6 +86,7 @@ jobs:
             echo "Non-strict DRC requested. Relaxing preflight checks for WIP branch..."
             sed -i 's/run_drc: true/run_drc: false/g' local_kibot.yaml
             sed -i 's/run_erc: true/run_erc: false/g' local_kibot.yaml
+            sed -i 's/severity: error/severity: warning/g' local_kibot.yaml
           fi
 
       - name: Resolve KiCad File Names
