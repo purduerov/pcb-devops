@@ -3,7 +3,6 @@ try:
     import defusedxml.ElementTree as ET
 except ImportError:
     import xml.etree.ElementTree as ET
-
 import urllib.request
 import urllib.parse
 import urllib.error
