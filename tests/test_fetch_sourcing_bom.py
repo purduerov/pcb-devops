@@ -15,6 +15,20 @@ class TestFetchSourcingBom(unittest.TestCase):
         parts = parse_kicad_xml_bom("non_existent_file.xml")
         self.assertEqual(parts, {})
 
+    def test_invalid_xml_handling(self):
+        # Should return an empty dictionary when XML is malformed
+        xml_content = "<?xml version='1.0'?><export><components><comp ref='R1'>"  # unclosed tag
+        with tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False, encoding='utf-8') as f:
+            f.write(xml_content)
+            temp_path = f.name
+
+        try:
+            parts = parse_kicad_xml_bom(temp_path)
+            self.assertEqual(parts, {})
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def test_standard_extraction(self):
         xml_content = """<?xml version="1.0" encoding="utf-8"?>
 <export version="D">
@@ -122,6 +136,7 @@ class TestFetchSourcingBom(unittest.TestCase):
         self.assertTrue(mock_urlopen.called)
         _, kwargs = mock_urlopen.call_args
         self.assertIn('timeout', kwargs)
+
     def test_case_insensitive_and_value_fallback(self):
         xml_content = """<?xml version="1.0" encoding="utf-8"?>
 <export version="D">
@@ -154,6 +169,70 @@ class TestFetchSourcingBom(unittest.TestCase):
             self.assertEqual(parts[("STM32F405RGT6", None)], ["U2"])
             self.assertIn(("10k", None), parts)
             self.assertEqual(parts[("10k", None)], ["R1"])
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_digikey_sku_field_alias(self):
+        xml_content = """<?xml version="1.0" encoding="utf-8"?>
+<export version="D">
+  <components>
+    <comp ref="U1">
+      <fields>
+        <field name="MPN">ATMEGA328P-PU</field>
+        <field name="DigiKey_SKU">ATMEGA328P-PU-ND</field>
+      </fields>
+    </comp>
+    <comp ref="U2">
+      <fields>
+        <field name="DigiKey_SKU">DK-ONLY-SKU</field>
+      </fields>
+    </comp>
+  </components>
+</export>
+"""
+        with tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False, encoding='utf-8') as f:
+            f.write(xml_content)
+            temp_path = f.name
+
+        try:
+            parts = parse_kicad_xml_bom(temp_path)
+            self.assertEqual(len(parts), 2)
+            self.assertIn(("ATMEGA328P-PU", "ATMEGA328P-PU-ND"), parts)
+            self.assertEqual(parts[("ATMEGA328P-PU", "ATMEGA328P-PU-ND")], ["U1"])
+            self.assertIn((None, "DK-ONLY-SKU"), parts)
+            self.assertEqual(parts[(None, "DK-ONLY-SKU")], ["U2"])
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_no_mpn_or_digikey_fields(self):
+        xml_content = """<?xml version="1.0" encoding="utf-8"?>
+<export version="D">
+  <components>
+    <comp ref="FID1">
+      <fields>
+        <field name="Value">Fiducial</field>
+      </fields>
+    </comp>
+    <comp ref="TP1">
+    </comp>
+    <comp ref="R4">
+      <fields>
+        <field name="MPN">   </field>
+        <field name="DigiKey"></field>
+      </fields>
+    </comp>
+  </components>
+</export>
+"""
+        with tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False, encoding='utf-8') as f:
+            f.write(xml_content)
+            temp_path = f.name
+
+        try:
+            parts = parse_kicad_xml_bom(temp_path)
+            self.assertEqual(parts, {})
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
