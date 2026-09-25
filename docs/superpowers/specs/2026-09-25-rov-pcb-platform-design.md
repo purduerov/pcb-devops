@@ -66,6 +66,7 @@ rov board validate
 rov board sync-library
 rov library list
 rov library search
+rov library sync
 rov library import
 rov library validate
 rov library build
@@ -180,7 +181,7 @@ The Library Manager GUI and the CLI both support the same operation:
 7. Commit only relevant library files.
 8. Push the branch and open a PR after explicit confirmation.
 
-Neither interface pushes directly to the protected library branch.
+Neither interface pushes directly to the protected library branch. The existing Library Manager Git Sync action maps to `rov library sync`, which fetches or fast-forwards a clean library checkout and never pushes.
 
 ### 4.5 Environment diagnosis
 
