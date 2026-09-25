@@ -609,18 +609,22 @@ def apply_library_update(
 
     The order of the steps is the safety contract:
 
-    1. a blocked plan or a dirty board is refused before anything is touched,
+    1. a blocked plan is refused before anything is touched, and ``create_pr``
+       without ``push`` is refused rather than silently reduced to a local apply,
     2. an up-to-date board is a PASS with no branch and no commit,
     3. the base branch is never used as the update branch, so it is never
        committed to and never pushed,
-    4. an existing branch is reused only when it was created from the same base,
-    5. the submodule moves with ``git checkout --detach``; ``reset --hard``,
+    4. a plan whose target is already recorded is a PASS no-op with no branch,
+       commit, push, or pull request, so a stale reapply cannot report work it
+       never did,
+    5. an existing branch is reused only when it was created from the same base,
+    6. the submodule moves with ``git checkout --detach``; ``reset --hard``,
        ``stash``, and ``clean`` are never used,
-    6. only the configured submodule path is staged and committed,
-    7. ``origin/<branch>`` is pushed only when the caller passes ``push=True``,
+    7. only the configured submodule path is staged and committed,
+    8. ``origin/<branch>`` is pushed only when the caller passes ``push=True``,
        only for the update branch, and never when it already holds a different
        commit, and
-    8. a pull request is opened only when the caller passes ``create_pr=True``,
+    9. a pull request is opened only when the caller passes ``create_pr=True``,
        and an existing pull request for the branch is reused instead of
        duplicated.
     """
@@ -630,6 +634,16 @@ def apply_library_update(
     if plan.blocked_reason:
         return CheckResult(
             name, STATUS_BLOCKED, f"the library update was not applied: {plan.blocked_reason}"
+        )
+    if create_pr and not push:
+        # Checked before any repository work: a request the caller cannot
+        # satisfy is reported, never silently reduced to a plain local apply.
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"a pull request can only be opened for a branch that was pushed, so create_pr "
+            f"requires push=True. The protected base branch is never pushed, so re-run with "
+            "push=True on an update branch.",
         )
     if not _git_is_available():
         return CheckResult(
@@ -699,6 +713,21 @@ def apply_library_update(
             STATUS_BLOCKED,
             f"{root} has uncommitted changes, so it was left untouched. Commit or stash "
             "them, then run the update again.",
+        )
+    # A plan applied once is stale: the board already records the target, so
+    # there is nothing to stage, commit, push, or open a pull request for. This
+    # is checked before the branch is touched so a reapply leaves the checkout
+    # exactly as it found it instead of reporting a commit it never made.
+    if submodule_commit == plan.target_commit and _library_pointer_is_current(
+        root, relative_path
+    ):
+        return CheckResult(
+            name,
+            STATUS_PASS,
+            f"the library submodule is already at {plan.target_commit}, so nothing was "
+            f"changed: 0 changed library file(s) and no commit on the planned "
+            f"{plan.current_commit} -> {plan.target_commit} update. No branch, push, or "
+            "pull request was created.",
         )
 
     blocked = _select_update_branch(root, update_branch, base)
@@ -796,6 +825,18 @@ def _git_output(repo_dir: Path, *args: str) -> str:
 def _local_branch_commit(root: Path, branch: str) -> str | None:
     """Return the commit a local branch points at, or None when it is absent."""
     return _git_output(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") or None
+
+
+def _library_pointer_is_current(root: Path, relative_path: str) -> bool:
+    """Return True when the recorded library pointer already matches the worktree.
+
+    A clean board already implies this, so the staged and unstaged views of the
+    submodule path are both confirmed instead of assuming it. The answer decides
+    whether an update still has a diff to commit.
+    """
+    staged = run_git(root, "diff", "--cached", "--name-only", "--", relative_path)
+    unstaged = run_git(root, "status", "--porcelain", "--", relative_path)
+    return not _nonempty_lines(staged.stdout) and not _nonempty_lines(unstaged.stdout)
 
 
 def _default_base_branch(root: Path, remote: str = DEFAULT_REMOTE) -> str:

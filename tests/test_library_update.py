@@ -597,7 +597,13 @@ class TestApplyLibraryUpdate(LibraryUpdateTestCase):
         self.assertTrue(fixture.board_clean())
 
     def test_existing_update_pr_is_reused_without_duplicate_push(self):
-        """An open pull request is reused; no second push and no second PR."""
+        """Reapplying a spent plan leaves the branch and its pull request alone.
+
+        Once the update branch is published, replaying the same plan finds the
+        board already at the target. The result must not report a commit it did
+        not make, must not push the branch again, and must not ask GitHub for or
+        open a second pull request.
+        """
         fixture = self.fixture
         fixture.publish()
         with offline_github():
@@ -618,15 +624,107 @@ class TestApplyLibraryUpdate(LibraryUpdateTestCase):
             )
 
         self.assertEqual(result.status, rov_core.STATUS_PASS, result.message)
-        self.assertIn(PR_URL, result.message)
         self.assertEqual(github.created, [], "an existing pull request must not be recreated")
-        self.assertTrue(
-            any(call[:2] == ["pr", "view"] for call in github.calls),
-            f"the existing pull request must be looked up first: {github.calls}",
-        )
+        self.assertEqual(github.calls, [], "an up-to-date board must not contact GitHub")
         self.assertEqual(pushed, [], "an identical branch must not be pushed again")
         self.assertEqual(fixture.remote_heads(), remote_before)
         self.assertEqual(fixture.board_head(), local_commit)
+        self.assertEqual(fixture.board_branch(), UPDATE_BRANCH)
+        self.assertTrue(fixture.board_clean())
+
+    def test_publishing_reuses_an_open_pull_request_without_pushing_again(self):
+        """The publish step reuses an open pull request and skips an identical push.
+
+        ``apply_library_update`` now returns a PASS no-op before publishing when
+        the board already records the target, so this covers the publish step
+        itself: an ``origin`` branch that already holds the prepared commit is
+        not pushed again, and an open pull request for it is reported instead of
+        a second one being opened.
+        """
+        fixture = self.fixture
+        fixture.publish()
+        with offline_github():
+            plan = rov_core.plan_library_update(fixture.board)
+        prepared = rov_core.apply_library_update(
+            fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE
+        )
+        self.assertEqual(prepared.status, rov_core.STATUS_PASS, prepared.message)
+        commit = fixture.board_head()
+        run_git(fixture.board, "push", "origin", f"{UPDATE_BRANCH}:{UPDATE_BRANCH}")
+        remote_before = fixture.remote_heads()
+
+        github = RecordingGitHub(existing_url=PR_URL)
+        with recording_git_verb(rov_core.run_git, "push", []) as pushed, mock.patch.object(
+            rov_core, "_gh_is_available", github.available
+        ), mock.patch.object(rov_core, "_run_gh", github.run):
+            published = rov_core._publish_update_branch(
+                fixture.board, UPDATE_BRANCH, commit, True, BASE_BRANCH, plan, LIBRARY_PATH
+            )
+
+        self.assertEqual(published, PR_URL)
+        self.assertEqual(github.created, [], "an existing pull request must not be recreated")
+        self.assertEqual(
+            github.calls, [["pr", "view", UPDATE_BRANCH, "--json", "url"]], github.calls
+        )
+        self.assertEqual(pushed, [], "an identical branch must not be pushed again")
+        self.assertEqual(fixture.remote_heads(), remote_before)
+
+    def test_pull_request_without_push_is_blocked_before_any_change(self):
+        """create_pr without push is refused, not silently dropped."""
+        fixture = self.fixture
+        fixture.publish()
+        with offline_github():
+            plan = rov_core.plan_library_update(fixture.board)
+        guarded = forbid_git_verb(
+            rov_core.run_git, "switch", "checkout", "add", "commit", "push"
+        )
+
+        with mock.patch.object(rov_core, "run_git", guarded):
+            result = rov_core.apply_library_update(
+                fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE, push=False, create_pr=True
+            )
+
+        self.assertEqual(result.status, rov_core.STATUS_BLOCKED, result.message)
+        self.assertIn("push=True", result.message)
+        self.assertIn("pull request", result.message)
+        self.assertEqual(fixture.board_branch(), BASE_BRANCH)
+        self.assertEqual(fixture.board_head(), fixture.board_base_commit)
+        self.assertEqual(fixture.submodule_head(), fixture.initial_library_commit)
+        self.assertEqual(fixture.remote_heads(), {f"refs/heads/{BASE_BRANCH}": fixture.board_base_commit})
+        self.assertTrue(fixture.board_clean())
+
+    def test_reapplying_a_spent_plan_is_a_no_op(self):
+        """A stale plan is a PASS no-op: no commit, no push, no pull request."""
+        fixture = self.fixture
+        fixture.publish()
+        with offline_github():
+            plan = rov_core.plan_library_update(fixture.board)
+            first = rov_core.apply_library_update(
+                fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE
+            )
+        self.assertEqual(first.status, rov_core.STATUS_PASS, first.message)
+        target = fixture.submodule_head()
+        local_commit = fixture.board_head()
+        remote_before = fixture.remote_heads()
+        github = RecordingGitHub(existing_url=PR_URL)
+
+        with recording_git_verb(rov_core.run_git, "push", []) as pushed, mock.patch.object(
+            rov_core, "_gh_is_available", github.available
+        ), mock.patch.object(rov_core, "_run_gh", github.run):
+            result = rov_core.apply_library_update(
+                fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE, push=True, create_pr=True
+            )
+
+        self.assertEqual(result.status, rov_core.STATUS_PASS, result.message)
+        self.assertIn(plan.current_commit, result.message)
+        self.assertIn(plan.target_commit, result.message)
+        self.assertIn("0 changed library file(s)", result.message)
+        self.assertNotIn(local_commit, result.message)
+        self.assertEqual(pushed, [])
+        self.assertEqual(github.calls, [])
+        self.assertEqual(fixture.board_head(), local_commit)
+        self.assertEqual(fixture.submodule_head(), target)
+        self.assertEqual(fixture.remote_heads(), remote_before)
         self.assertEqual(fixture.board_branch(), UPDATE_BRANCH)
         self.assertTrue(fixture.board_clean())
 
