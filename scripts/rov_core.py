@@ -10,12 +10,13 @@ performs destructive Git operations.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 
 STATUS_PASS = "PASS"
 STATUS_WARN = "WARN"
@@ -66,6 +67,17 @@ fi
 # them into one result using the same precedence as the CLI exit-code rule:
 # FAIL beats BLOCKED, BLOCKED beats WARN, and WARN beats PASS.
 _BOOTSTRAP_STATUS_PRECEDENCE = (STATUS_FAIL, STATUS_BLOCKED, STATUS_WARN, STATUS_PASS)
+
+# Bootstrap messages carry their status as a leading ``[STATUS]`` tag. The
+# pattern is the single parser for that tag, so a message can never be read as
+# a pass by one interface and as a failure by another.
+_STATUS_PREFIX_PATTERN = re.compile(r"^\[(PASS|WARN|FAIL|BLOCKED)\][ \t]*(.*)$", re.DOTALL)
+
+# Unresolved Git conflict markers are matched exactly like the CI grep: anchored
+# to the start of a line, so legitimate runs of '=' inside design data are not
+# reported. The checked file set is the same one CI scans.
+CONFLICT_MARKER_PATTERN = re.compile(r"^(<{7}|={7}|>{7})", re.MULTILINE)
+CONFLICT_CHECK_PATTERNS = ("*.kicad_sch", "*.kicad_pcb", "*.kicad_pro", "*-lib-table")
 
 # Characters that are illegal in a Windows or POSIX file name. They are replaced
 # rather than rejected so a friendlier name such as "X19: Control" still works.
@@ -281,7 +293,7 @@ def check_submodule(project_dir: Path, config: Mapping[str, object]) -> CheckRes
             "can be resolved.",
         )
 
-    relative_path = _normalize_relative_path(configured_path)
+    relative_path = normalize_relative_path(configured_path)
     library_dir = project_dir / Path(relative_path)
     if not library_dir.is_dir():
         return CheckResult(
@@ -325,6 +337,70 @@ def _declared_submodule_paths(project_dir: Path) -> set[str]:
         match.replace("\\", "/").strip("/")
         for match in re.findall(r"^[ \t]*path[ \t]*=[ \t]*(.+?)[ \t]*$", content, re.MULTILINE)
     }
+
+
+def check_merge_conflict_markers(
+    project_dir: Path, skip_dirs: Iterable[str] = ()
+) -> list[CheckResult]:
+    """Report design files that still contain unresolved Git conflict markers.
+
+    The scan is recursive, prunes dot-directories, and never descends into
+    ``skip_dirs`` so a board does not re-scan its library submodule. It is the
+    same rule CI applies, kept here so the CLI and CI can never disagree.
+    """
+    root = Path(project_dir)
+    if not root.is_dir():
+        return [
+            CheckResult(
+                "merge-conflict-markers",
+                STATUS_BLOCKED,
+                f"{root} is not a directory, so no conflict markers were checked.",
+            )
+        ]
+
+    skipped = {normalize_relative_path(value) for value in skip_dirs if str(value).strip()}
+    offenders: list[str] = []
+    checked = 0
+    for path in _design_files(root, skipped):
+        content = _read_text_or_none(path)
+        if content is None:
+            continue
+        checked += 1
+        if CONFLICT_MARKER_PATTERN.search(content):
+            offenders.append(path.relative_to(root).as_posix())
+
+    if offenders:
+        return [
+            CheckResult(
+                "merge-conflict-markers",
+                STATUS_FAIL,
+                f"Unresolved merge conflict markers in: {', '.join(sorted(offenders))}. "
+                "Finish or abort the merge before committing.",
+            )
+        ]
+    return [
+        CheckResult(
+            "merge-conflict-markers",
+            STATUS_PASS,
+            f"No merge conflict markers were found in {checked} design file(s).",
+        )
+    ]
+
+
+def _design_files(root: Path, skipped: set[str]) -> Iterable[Path]:
+    """Yield the conflict-marker check targets under ``root``."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        relative_dir = Path(dirpath).relative_to(root)
+        relative = "" if relative_dir == Path(".") else relative_dir.as_posix()
+        if relative in skipped:
+            dirnames[:] = []
+            continue
+        dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            if any(Path(name).match(pattern) for pattern in CONFLICT_CHECK_PATTERNS):
+                yield Path(dirpath) / name
 
 
 def run_git(
@@ -437,6 +513,40 @@ def bootstrap_status(result: BootstrapResult) -> str:
         if any(message.startswith(prefix) for message in result.messages):
             return status
     return STATUS_PASS
+
+
+def worst_status(results: Iterable[CheckResult]) -> str:
+    """Return the most severe status in ``results`` using the shared precedence.
+
+    FAIL beats BLOCKED, BLOCKED beats WARN, and WARN beats PASS. An empty
+    sequence is PASS. Every interface maps a status set to one decision through
+    this helper so the CLI, the GUI, and CI cannot disagree.
+    """
+    statuses = {result.status for result in results}
+    for status in _BOOTSTRAP_STATUS_PRECEDENCE:
+        if status in statuses:
+            return status
+    return STATUS_PASS
+
+
+def bootstrap_results(result: BootstrapResult) -> list[CheckResult]:
+    """Convert bootstrap messages into results, keeping each message status.
+
+    The message prefixes are the contract, so a ``[BLOCKED]`` step can never be
+    reported to a caller as a pass. The prefix is removed from the message text
+    because the status is rendered separately.
+    """
+    return [
+        CheckResult("bootstrap", *_split_status_prefix(message)) for message in result.messages
+    ]
+
+
+def _split_status_prefix(message: str) -> tuple[str, str]:
+    """Split a ``[STATUS] text`` bootstrap message into its status and text."""
+    match = _STATUS_PREFIX_PATTERN.match(message)
+    if match is None:
+        return STATUS_PASS, message
+    return match.group(1), match.group(2)
 
 
 def default_project_config(project_name: str) -> dict[str, object]:
@@ -805,18 +915,27 @@ def _library_target(config: Mapping[str, object]) -> tuple[str, str]:
     if isinstance(library, Mapping):
         configured_path = library.get("path")
         if isinstance(configured_path, str) and configured_path.strip():
-            relative_path = _normalize_relative_path(configured_path)
+            relative_path = normalize_relative_path(configured_path)
         configured_branch = library.get("branch")
         if isinstance(configured_branch, str) and configured_branch.strip():
             branch = configured_branch.strip()
     return relative_path, branch
 
 
-def _normalize_relative_path(value: str) -> str:
+def configured_library_path(config: Mapping[str, object] | None) -> str:
+    """Return the library submodule path a manifest selects, or the default.
+
+    Validation, bootstrap, and the CLI all read the path through this helper so
+    they can never resolve a different directory for the same manifest.
+    """
+    return _library_target(config)[0]
+
+
+def normalize_relative_path(value: str) -> str:
     """Return a trimmed, forward-slash relative path for a configured path.
 
-    Shared by ``check_submodule`` and the bootstrap flow so both compare the same
-    text against ``.gitmodules`` on every platform.
+    Public because the CLI compares a caller-supplied library path against the
+    manifest value, and both sides must normalize identically on every platform.
     """
     return value.strip().replace("\\", "/")
 
