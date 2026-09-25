@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import shutil
@@ -255,7 +256,7 @@ class TestBootstrap(unittest.TestCase):
             self.assertNotIn("checkout -B", text)
 
 
-class TestBootstrapSafety(GitFixtureMixin):
+class TestBootstrapSafety(GitFixtureMixin, unittest.TestCase):
     def make_template(self, root: Path) -> None:
         TestBootstrap.make_template(self, root)
 
@@ -1045,6 +1046,61 @@ class TestLaunchKicadControlFlow(unittest.TestCase):
         self.assertNotIn("checkout -B", text)
         self.assertIn("board bootstrap --project-dir", text)
         self.assertIn("kicad", text)
+
+
+class TestCollectionIntegrity(unittest.TestCase):
+    """Fail loudly when a defined test method is silently never collected.
+
+    ``unittest.TestLoader`` skips any class that is not a ``TestCase``
+    subclass, so a missing base class used to shrink the reported test count
+    instead of failing. This compares what the module defines with what the
+    loader actually collects.
+    """
+
+    @staticmethod
+    def _is_test_method(member: object) -> bool:
+        return inspect.isfunction(member) or inspect.ismethod(member)
+
+    @staticmethod
+    def _flatten(suite: unittest.TestSuite) -> list[unittest.TestCase]:
+        """Return every TestCase, descending into the per-class sub-suites.
+
+        ``loadTestsFromModule`` wraps each class in its own suite, so the tests
+        are one level deeper than the returned object.
+        """
+        cases: list[unittest.TestCase] = []
+        for item in suite:
+            if isinstance(item, unittest.TestSuite):
+                cases.extend(TestCollectionIntegrity._flatten(item))
+            else:
+                cases.append(item)
+        return cases
+
+    def test_every_defined_test_method_is_collected(self):
+        module = sys.modules[__name__]
+        defined = {
+            f"{name}.{method_name}"
+            for name, obj in vars(module).items()
+            if inspect.isclass(obj)
+            for method_name, _ in inspect.getmembers(obj, self._is_test_method)
+            if method_name.startswith("test_")
+        }
+        loaded = unittest.TestLoader().loadTestsFromModule(module)
+        cases = self._flatten(loaded)
+        collected = {f"{case.__class__.__name__}.{case._testMethodName}" for case in cases}
+
+        self.assertEqual(
+            defined - collected,
+            set(),
+            "these test methods are defined but never collected; check that the "
+            "class inherits unittest.TestCase:",
+        )
+        self.assertEqual(collected - defined, set())
+        self.assertEqual(
+            loaded.countTestCases(),
+            len(defined),
+            "the loader must report one test per defined test method",
+        )
 
 
 if __name__ == "__main__":
