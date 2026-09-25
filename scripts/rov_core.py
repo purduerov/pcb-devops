@@ -31,6 +31,29 @@ SCHEMA_VERSION = 1
 LIBRARY_SUBMODULE_PATH = "libs/purdue-rov-kicad-lib"
 CI_PROFILE_STANDARD = "standard"
 
+# Library update contract. The exact strings are the published behavior of
+# ``rov board sync-library``: the branch a reviewable update lands on, the
+# commit it records, the pull request title it opens, and the protected branches
+# that are never committed to or pushed. The CLI and this module share these
+# values so a local run and a scheduled workflow cannot drift apart.
+LIBRARY_UPDATE_BRANCH = "chore/library-update"
+LIBRARY_UPDATE_COMMIT_MESSAGE = "chore(library): update Purdue ROV component library"
+LIBRARY_UPDATE_PR_TITLE = "chore: update Purdue ROV component library"
+PROTECTED_BRANCHES = frozenset({"master", "main", "develop", "development", "release"})
+DEFAULT_REMOTE = "origin"
+GITHUB_CLI = "gh"
+
+# A library fetch is the only command that can leave the machine. It is bounded
+# so an unreachable or hanging remote reports a blocked plan instead of hanging a
+# board; the GitHub CLI calls made while publishing a pull request are bounded
+# the same way.
+LIBRARY_FETCH_TIMEOUT_SECONDS = 60
+GITHUB_CLI_TIMEOUT_SECONDS = 120
+
+# The single wording for a rewritten remote library history. It is a contract:
+# the CLI prints it verbatim and CI can match on it.
+DIVERGED_HISTORY_REASON = "remote library history diverged"
+
 # Bootstrap contract. ``TEMPLATE_STEM`` is the starter design file stem shipped by
 # the board template; ``PROJECT_FILE_EXTENSIONS`` lists the files that are
 # renamed to the requested project name.
@@ -406,9 +429,14 @@ def _design_files(root: Path, skipped: set[str]) -> Iterable[Path]:
 
 
 def run_git(
-    repo_dir: Path, *args: str, check: bool = False
+    repo_dir: Path, *args: str, check: bool = False, timeout: float | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """Run a non-shell Git command in ``repo_dir``."""
+    """Run a non-shell Git command in ``repo_dir``.
+
+    ``timeout`` is passed straight to ``subprocess`` and is only set by the
+    commands that can reach a network, so a remote that never answers is
+    reported instead of stalling the caller.
+    """
     if shutil.which("git") is None:
         raise RuntimeError("Git is required but was not found")
 
@@ -420,6 +448,7 @@ def run_git(
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=timeout,
     )
     if check and result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"git {' '.join(args)} failed"
@@ -445,6 +474,556 @@ def is_clean_worktree(repo_dir: Path) -> bool:
 def current_branch(repo_dir: Path) -> str | None:
     """Return the checked-out branch name, or None when HEAD is detached."""
     return run_git(repo_dir, "symbolic-ref", "--quiet", "--short", "HEAD").stdout.strip() or None
+
+
+# ---------------------------------------------------------------------------
+# Library update planning and update-branch preparation
+# ---------------------------------------------------------------------------
+
+
+def plan_library_update(
+    project_dir: Path, remote: str = DEFAULT_REMOTE, branch: str = LIBRARY_BRANCH
+) -> LibraryUpdatePlan:
+    """Resolve the approved library revision a board should move to.
+
+    The plan is read-only. It loads and validates the board manifest, refuses to
+    continue while either worktree has local changes, syncs and fetches the
+    library submodule, and reports the target commit with the library files that
+    differ. Every condition that needs a developer's attention becomes a
+    ``blocked_reason`` rather than an empty successful plan, so a caller can
+    never mistake an unreachable or rewritten remote for an up-to-date library.
+
+    Nothing is written to the board: the only repository state that changes is
+    the submodule's fetched objects and its local ``.git/config`` URL, both of
+    which Git manages for exactly this purpose.
+    """
+    root = Path(project_dir)
+
+    try:
+        config = load_project_config(root)
+    except ValueError as exc:
+        return _blocked_plan(str(exc))
+    problems = [
+        result
+        for result in validate_project_config(config)
+        if result.status != STATUS_PASS
+    ]
+    if problems:
+        return _blocked_plan(
+            f"{PROJECT_CONFIG_NAME} is not usable: "
+            + "; ".join(f"{result.name}: {result.message}" for result in problems)
+        )
+
+    relative_path = configured_library_path(config)
+    library_dir = root / Path(relative_path)
+
+    if not _git_is_available():
+        return _blocked_plan("Git is unavailable, so no update was planned.")
+    if not is_git_worktree(root):
+        return _blocked_plan(f"{root} is not a Git work tree, so no update was planned.")
+    if not library_dir.is_dir() or not _is_own_git_worktree(library_dir):
+        return _blocked_plan(
+            f"the library submodule at {relative_path} is not initialized. Run "
+            "'git submodule update --init --recursive'."
+        )
+    if not is_clean_worktree(library_dir):
+        return _blocked_plan(
+            f"the library submodule at {relative_path} has local changes, so it was left "
+            "untouched. Commit or stash them, then plan the update again."
+        )
+    if not is_clean_worktree(root):
+        return _blocked_plan(
+            f"{root} has uncommitted changes, so it was left untouched. Commit or stash "
+            "them, then plan the update again."
+        )
+
+    sync = run_git(root, "submodule", "sync", "--", relative_path)
+    if sync.returncode != 0:
+        return _blocked_plan(
+            f"could not sync the library submodule URL for {relative_path}: {_git_detail(sync)}"
+        )
+
+    try:
+        fetch = run_git(
+            library_dir, "fetch", remote, branch, timeout=LIBRARY_FETCH_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired:
+        return _blocked_plan(
+            f"fetching {remote}/{branch} for the library submodule did not finish within "
+            f"{LIBRARY_FETCH_TIMEOUT_SECONDS} seconds, so the library may be stale."
+        )
+    if fetch.returncode != 0:
+        return _blocked_plan(
+            f"could not fetch {remote}/{branch} for the library submodule (git "
+            f"{_git_detail(fetch)}); the cached revision was kept and the library may be stale."
+        )
+
+    current = _git_output(library_dir, "rev-parse", "HEAD")
+    target = _git_output(library_dir, "rev-parse", "FETCH_HEAD")
+    if not current or not target:
+        return _blocked_plan(
+            "could not resolve the current and target library commits, so the library "
+            "may be stale."
+        )
+    if current == target:
+        return LibraryUpdatePlan(
+            current_commit=current,
+            target_commit=target,
+            changed_files=(),
+            blocked_reason=None,
+        )
+
+    # A submodule can only fast-forward. Anything else means the approved history
+    # was rewritten and a board must not be pointed at it automatically.
+    if run_git(library_dir, "merge-base", "--is-ancestor", current, target).returncode != 0:
+        return LibraryUpdatePlan(
+            current_commit=current,
+            target_commit=target,
+            changed_files=(),
+            blocked_reason=DIVERGED_HISTORY_REASON,
+        )
+
+    diff = run_git(library_dir, "diff", "--name-only", f"{current}..{target}")
+    if diff.returncode != 0:
+        return _blocked_plan(
+            f"could not list the library changes between {current} and {target}: "
+            f"{_git_detail(diff)}"
+        )
+    return LibraryUpdatePlan(
+        current_commit=current,
+        target_commit=target,
+        changed_files=tuple(_nonempty_lines(diff.stdout)),
+        blocked_reason=None,
+    )
+
+
+def apply_library_update(
+    project_dir: Path,
+    plan: LibraryUpdatePlan,
+    branch_name: str,
+    commit_message: str,
+    push: bool = False,
+    create_pr: bool = False,
+) -> CheckResult:
+    """Move a board to ``plan.target_commit`` on a reviewable update branch.
+
+    The order of the steps is the safety contract:
+
+    1. a blocked plan or a dirty board is refused before anything is touched,
+    2. an up-to-date board is a PASS with no branch and no commit,
+    3. the base branch is never used as the update branch, so it is never
+       committed to and never pushed,
+    4. an existing branch is reused only when it was created from the same base,
+    5. the submodule moves with ``git checkout --detach``; ``reset --hard``,
+       ``stash``, and ``clean`` are never used,
+    6. only the configured submodule path is staged and committed,
+    7. ``origin/<branch>`` is pushed only when the caller passes ``push=True``,
+       only for the update branch, and never when it already holds a different
+       commit, and
+    8. a pull request is opened only when the caller passes ``create_pr=True``,
+       and an existing pull request for the branch is reused instead of
+       duplicated.
+    """
+    root = Path(project_dir)
+    name = "library-update"
+
+    if plan.blocked_reason:
+        return CheckResult(
+            name, STATUS_BLOCKED, f"the library update was not applied: {plan.blocked_reason}"
+        )
+    if not _git_is_available():
+        return CheckResult(
+            name, STATUS_BLOCKED, "Git is unavailable, so nothing was changed."
+        )
+    if not is_git_worktree(root):
+        return CheckResult(
+            name, STATUS_BLOCKED, f"{root} is not a Git work tree, so nothing was changed."
+        )
+    if plan.current_commit == plan.target_commit:
+        return CheckResult(
+            name,
+            STATUS_PASS,
+            f"the library submodule is already at {plan.target_commit}; nothing was changed.",
+        )
+
+    update_branch = (branch_name or "").strip()
+    if not update_branch:
+        return CheckResult(
+            name, STATUS_BLOCKED, f"an update branch name is required, such as {LIBRARY_UPDATE_BRANCH}."
+        )
+    base = _default_base_branch(root)
+    if update_branch == base or update_branch in PROTECTED_BRANCHES:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"refusing to use {update_branch} as the update branch: a base branch is never "
+            f"committed to or pushed. Use a branch such as {LIBRARY_UPDATE_BRANCH}.",
+        )
+
+    try:
+        config = load_project_config(root)
+    except ValueError as exc:
+        return CheckResult(name, STATUS_BLOCKED, str(exc))
+    relative_path = configured_library_path(config)
+    library_dir = root / Path(relative_path)
+
+    if not library_dir.is_dir() or not _is_own_git_worktree(library_dir):
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"the library submodule at {relative_path} is not initialized. Run "
+            "'git submodule update --init --recursive'.",
+        )
+    if not is_clean_worktree(library_dir):
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"the library submodule at {relative_path} has local changes, so it was left "
+            "untouched. Commit or stash them, then run the update again.",
+        )
+    submodule_commit = _git_output(library_dir, "rev-parse", "HEAD")
+    if submodule_commit not in {plan.current_commit, plan.target_commit}:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"the library submodule is at {submodule_commit or 'an unknown commit'}, which is "
+            f"neither the planned {plan.current_commit} nor the target {plan.target_commit}. "
+            "Plan the update again.",
+        )
+    # The library is checked before the board so a dirty submodule is named
+    # precisely instead of being reported as a dirty board, exactly as in
+    # ``plan_library_update``.
+    if not is_clean_worktree(root):
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"{root} has uncommitted changes, so it was left untouched. Commit or stash "
+            "them, then run the update again.",
+        )
+
+    blocked = _select_update_branch(root, update_branch, base)
+    if blocked is not None:
+        return blocked
+
+    checkout = run_git(library_dir, "checkout", "--detach", plan.target_commit)
+    if checkout.returncode != 0:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"could not check out library commit {plan.target_commit}: {_git_detail(checkout)}",
+        )
+    if _git_output(library_dir, "rev-parse", "HEAD") != plan.target_commit:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"the library submodule is not at {plan.target_commit} after checkout, so "
+            "nothing was committed.",
+        )
+
+    added = run_git(root, "add", "--", relative_path)
+    if added.returncode != 0:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"could not stage {relative_path}: {_git_detail(added)}",
+        )
+    staged = tuple(_nonempty_lines(run_git(root, "diff", "--cached", "--name-only").stdout))
+    if staged and staged != (relative_path,):
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            "refusing to commit staged changes outside the library submodule: "
+            f"{', '.join(staged)}.",
+        )
+
+    if staged:
+        message = (commit_message or "").strip()
+        if not message:
+            return CheckResult(
+                name, STATUS_BLOCKED, "a commit message is required to record the update."
+            )
+        committed = run_git(root, "commit", "-m", message)
+        if committed.returncode != 0:
+            return CheckResult(
+                name,
+                STATUS_BLOCKED,
+                f"could not commit the library update on {update_branch}: "
+                f"{_git_detail(committed)}",
+            )
+    commit = _git_output(root, "rev-parse", "HEAD")
+    if not commit:
+        return CheckResult(
+            name, STATUS_BLOCKED, f"could not resolve the commit on {update_branch}."
+        )
+
+    pull_request_url = ""
+    if push:
+        published = _publish_update_branch(
+            root, update_branch, commit, create_pr, base, plan, relative_path
+        )
+        if isinstance(published, CheckResult):
+            return published
+        pull_request_url = published
+
+    summary = (
+        f"Updated {relative_path} from {plan.current_commit[:12]} to "
+        f"{plan.target_commit[:12]} on branch {update_branch}: "
+        f"{len(plan.changed_files)} changed library file(s), commit {commit[:12]}"
+    )
+    if pull_request_url:
+        summary = f"{summary}; pull request {pull_request_url}"
+    return CheckResult(name, STATUS_PASS, summary)
+
+
+def _blocked_plan(reason: str) -> LibraryUpdatePlan:
+    """Return a plan that reports only why the update cannot proceed."""
+    return LibraryUpdatePlan(
+        current_commit="", target_commit="", changed_files=(), blocked_reason=reason
+    )
+
+
+def _nonempty_lines(text: str) -> list[str]:
+    """Return the stripped, non-empty lines of command output."""
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _git_output(repo_dir: Path, *args: str) -> str:
+    """Return a Git command's trimmed stdout, or an empty string on failure."""
+    result = run_git(repo_dir, *args)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _local_branch_commit(root: Path, branch: str) -> str | None:
+    """Return the commit a local branch points at, or None when it is absent."""
+    return _git_output(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") or None
+
+
+def _default_base_branch(root: Path, remote: str = DEFAULT_REMOTE) -> str:
+    """Return the branch an update branch should be based on.
+
+    ``origin/HEAD`` is the remote's own record of the default branch. The local
+    ``master``/``main`` fallbacks keep a board without a remote usable, and the
+    checked-out branch is the last resort so a detached HEAD is never reported as
+    a base.
+    """
+    symbolic = run_git(
+        root, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD"
+    ).stdout.strip()
+    prefix = f"{remote}/"
+    if symbolic.startswith(prefix):
+        return symbolic[len(prefix) :]
+    for candidate in (LIBRARY_BRANCH, "main"):
+        if _local_branch_commit(root, candidate):
+            return candidate
+    return current_branch(root) or LIBRARY_BRANCH
+
+
+def _select_update_branch(root: Path, update_branch: str, base: str) -> CheckResult | None:
+    """Create the update branch from ``base`` or switch to a matching one.
+
+    An existing branch is reused only when it was created from the same base
+    commit, so a branch that was made from an older base is reported instead of
+    being silently extended. Returns a BLOCKED result, or None when the update
+    branch is checked out and ready for the commit.
+    """
+    existing = _local_branch_commit(root, update_branch)
+    if existing is None:
+        created = run_git(root, "switch", "-c", update_branch, base)
+        if created.returncode != 0:
+            return CheckResult(
+                "library-update",
+                STATUS_BLOCKED,
+                f"could not create the update branch {update_branch} from {base}: "
+                f"{_git_detail(created)}",
+            )
+        return None
+
+    fork_point = _git_output(root, "merge-base", update_branch, base)
+    if fork_point != _git_output(root, "rev-parse", base):
+        return CheckResult(
+            "library-update",
+            STATUS_BLOCKED,
+            f"the existing branch {update_branch} was not created from {base}, so it was "
+            "not reused. Update or delete that branch, then run the update again.",
+        )
+    switched = run_git(root, "switch", update_branch)
+    if switched.returncode != 0:
+        return CheckResult(
+            "library-update",
+            STATUS_BLOCKED,
+            f"could not switch to the update branch {update_branch}: {_git_detail(switched)}",
+        )
+    return None
+
+
+def _publish_update_branch(
+    root: Path,
+    update_branch: str,
+    commit: str,
+    create_pr: bool,
+    base: str,
+    plan: LibraryUpdatePlan,
+    relative_path: str,
+) -> CheckResult | str:
+    """Push the update branch and optionally open one pull request.
+
+    Returns the pull request URL, or a BLOCKED result. A pull request is only
+    looked up when one is requested, so pushing a branch never depends on the
+    GitHub CLI being installed.
+    """
+    if create_pr and not _gh_is_available():
+        return CheckResult(
+            "library-update",
+            STATUS_BLOCKED,
+            f"the local branch {update_branch} was prepared, but {GITHUB_CLI} was not found "
+            "on PATH, so nothing was pushed. Install and authenticate the GitHub CLI, or "
+            "push the branch yourself and open the pull request in the browser.",
+        )
+
+    remote_commit = _remote_branch_commit(root, DEFAULT_REMOTE, update_branch)
+    if remote_commit and remote_commit != commit:
+        return CheckResult(
+            "library-update",
+            STATUS_BLOCKED,
+            f"{DEFAULT_REMOTE}/{update_branch} already points at {remote_commit}, which is "
+            f"not the prepared commit {commit}, so nothing was pushed. Resolve that branch "
+            "before running the update again.",
+        )
+    if not remote_commit:
+        pushed = run_git(
+            root, "push", DEFAULT_REMOTE, f"refs/heads/{update_branch}:refs/heads/{update_branch}"
+        )
+        if pushed.returncode != 0:
+            return CheckResult(
+                "library-update",
+                STATUS_BLOCKED,
+                f"could not push {update_branch} to {DEFAULT_REMOTE}: {_git_detail(pushed)}. "
+                f"The commit is kept on {update_branch} locally.",
+            )
+
+    if not create_pr:
+        return ""
+    existing_url = _existing_pull_request_url(root, update_branch)
+    if existing_url:
+        return existing_url
+
+    created = _run_gh(
+        [
+            "pr",
+            "create",
+            "--base",
+            base,
+            "--head",
+            update_branch,
+            "--title",
+            LIBRARY_UPDATE_PR_TITLE,
+            "--body",
+            _library_update_body(plan, relative_path),
+        ],
+        cwd=root,
+        timeout=GITHUB_CLI_TIMEOUT_SECONDS,
+    )
+    if created.returncode != 0:
+        return CheckResult(
+            "library-update",
+            STATUS_BLOCKED,
+            f"{update_branch} was pushed, but {GITHUB_CLI} could not open the pull request: "
+            f"{_output_detail(created, f'{GITHUB_CLI} pr create failed')}. The branch is "
+            "published; open the pull request from GitHub.",
+        )
+    return _pull_request_url(created.stdout)
+
+
+def _remote_branch_commit(root: Path, remote: str, branch: str) -> str | None:
+    """Return the commit a remote branch points at, or None when it is absent."""
+    result = run_git(root, "ls-remote", "--heads", remote, branch)
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        commit, _, ref = line.partition("\t")
+        if ref.strip() == f"refs/heads/{branch}":
+            return commit.strip() or None
+    return None
+
+
+def _gh_is_available() -> bool:
+    """Return True when the GitHub CLI is on PATH."""
+    return shutil.which(GITHUB_CLI) is not None
+
+
+def _run_gh(
+    args: list[str], cwd: Path | None = None, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one GitHub CLI command without a shell.
+
+    A missing, unusable, or hung CLI is reported as a failed command instead of
+    an exception, so every caller can turn it into a BLOCKED result. The caller
+    still checks ``_gh_is_available`` first to decide whether a pull request can
+    be opened at all.
+    """
+    if shutil.which(GITHUB_CLI) is None:
+        return _failed_gh(args, f"{GITHUB_CLI} was required but was not found on PATH")
+    try:
+        return subprocess.run(
+            [GITHUB_CLI, *args],
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return _failed_gh(
+            args, f"{GITHUB_CLI} did not finish within {timeout or 0} seconds"
+        )
+    except OSError as exc:
+        return _failed_gh(args, f"{GITHUB_CLI} could not be started: {exc}")
+
+
+def _failed_gh(args: list[str], detail: str) -> subprocess.CompletedProcess[str]:
+    """Return a failed GitHub CLI result carrying ``detail`` as its error."""
+    return subprocess.CompletedProcess(
+        args=[GITHUB_CLI, *args], returncode=1, stdout="", stderr=f"{detail}\n"
+    )
+
+
+def _existing_pull_request_url(root: Path, branch: str) -> str | None:
+    """Return the URL of an open pull request for ``branch``, if one exists."""
+    if not _gh_is_available():
+        return None
+    result = _run_gh(
+        ["pr", "view", branch, "--json", "url"],
+        cwd=root,
+        timeout=GITHUB_CLI_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    url = payload.get("url") if isinstance(payload, Mapping) else None
+    return url.strip() if isinstance(url, str) and url.strip() else None
+
+
+def _library_update_body(plan: LibraryUpdatePlan, relative_path: str) -> str:
+    """Return the pull request body describing the library revision change."""
+    changed = "\n".join(f"- `{name}`" for name in plan.changed_files) or "- none"
+    return (
+        f"Updates {relative_path} from {plan.current_commit[:12]} to "
+        f"{plan.target_commit[:12]}.\n\n"
+        f"Library files changed: {len(plan.changed_files)}\n\n{changed}\n"
+    )
+
+
+def _pull_request_url(stdout: str) -> str:
+    """Return the pull request URL from ``gh pr create`` output."""
+    for line in reversed(_nonempty_lines(stdout)):
+        if line.startswith("http"):
+            return line
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -592,13 +1171,18 @@ def _write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def _git_detail(result: subprocess.CompletedProcess[str]) -> str:
-    """Return a single-line summary of a failed Git command."""
+def _output_detail(result: subprocess.CompletedProcess[str], fallback: str) -> str:
+    """Return the last non-empty line of a failed command's output."""
     for stream in (result.stderr, result.stdout):
         lines = [line.strip() for line in stream.splitlines() if line.strip()]
         if lines:
             return lines[-1]
-    return f"git exited with status {result.returncode}"
+    return fallback
+
+
+def _git_detail(result: subprocess.CompletedProcess[str]) -> str:
+    """Return a single-line summary of a failed Git command."""
+    return _output_detail(result, f"git exited with status {result.returncode}")
 
 
 def _git_is_available() -> bool:

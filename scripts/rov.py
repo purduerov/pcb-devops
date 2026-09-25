@@ -47,8 +47,8 @@ GUI_FILE = "library_manager_gui.py"
 GENERATED_SYMBOL_FILES = frozenset(f"{lib['name']}.kicad_sym" for lib in rov_core.STANDARD_LIBS)
 SYMBOL_ROW_COLUMNS = ("name", "category", "MPN", "manufacturer")
 
-DEFAULT_SYNC_BRANCH = "chore/library-update"
-DEFAULT_SYNC_COMMIT_MESSAGE = "chore(library): update Purdue ROV component library"
+DEFAULT_SYNC_BRANCH = rov_core.LIBRARY_UPDATE_BRANCH
+DEFAULT_SYNC_COMMIT_MESSAGE = rov_core.LIBRARY_UPDATE_COMMIT_MESSAGE
 
 # Tool timeouts in seconds. Doctor probes stay short so a missing or hung
 # service cannot stall a diagnosis; the heavy KiCad runs get a full allowance.
@@ -557,15 +557,24 @@ def run_board_sync_library(
     library_branch: str = rov_core.LIBRARY_BRANCH,
     apply: bool = False,
     branch: str | None = None,
+    commit_message: str | None = None,
     push: bool = False,
     create_pr: bool = False,
 ) -> list[CheckResult]:
     """Plan a library update and apply it only when explicitly requested.
 
-    The command is a dry run until ``--apply`` is given, so the default path
-    only reports what would change. Planning and applying live in ``rov_core``
-    and are reached through ``getattr`` so this command can exist, and report a
-    clear BLOCKED state, before that shared implementation is in place.
+    The command is a dry run until ``--apply`` is given, so the default path only
+    reports the current commit, the target commit, the changed library files, and
+    any blocked reason. Planning and applying live in ``rov_core`` and are
+    reached through ``getattr``, which reports a clear BLOCKED state when the
+    shared function is missing or unset instead of raising ``AttributeError``.
+    The guard never assumes the function is absent, so a build with the real
+    implementation always takes the normal path.
+
+    ``--apply`` prepares the update branch named by ``--branch``, defaulting to
+    ``chore/library-update``. Only ``--push`` publishes that branch, and only
+    ``--push`` together with ``--pr`` opens a pull request. The protected base
+    branch is never committed to or pushed.
     """
     root = Path(project_dir)
     try:
@@ -677,7 +686,7 @@ def run_board_sync_library(
             root,
             plan,
             branch or DEFAULT_SYNC_BRANCH,
-            DEFAULT_SYNC_COMMIT_MESSAGE,
+            (commit_message or "").strip() or DEFAULT_SYNC_COMMIT_MESSAGE,
             push=push,
             create_pr=create_pr,
         )
@@ -1025,9 +1034,19 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument(
         "--apply", action="store_true", help="Apply the plan. Without it the command is a dry run."
     )
-    sync.add_argument("--branch", help=f"Update branch to create (default: {DEFAULT_SYNC_BRANCH}).")
+    sync.add_argument(
+        "--branch", help=f"Update branch to create (default: {DEFAULT_SYNC_BRANCH})."
+    )
+    sync.add_argument(
+        "--commit-message",
+        help=f"Commit message for the update (default: {DEFAULT_SYNC_COMMIT_MESSAGE!r}).",
+    )
     sync.add_argument("--push", action="store_true", help="Push the update branch after applying.")
-    sync.add_argument("--pr", action="store_true", help="Open a pull request after pushing.")
+    sync.add_argument(
+        "--pr",
+        action="store_true",
+        help=f"Open a pull request after pushing (title: {rov_core.LIBRARY_UPDATE_PR_TITLE!r}).",
+    )
     sync.set_defaults(handler=_cmd_board_sync_library)
 
     library = commands.add_parser("library", help="Approved standard library commands.")
@@ -1151,6 +1170,7 @@ def _cmd_board_sync_library(args: argparse.Namespace) -> int:
         library_branch=args.library_branch,
         apply=args.apply,
         branch=args.branch,
+        commit_message=args.commit_message,
         push=args.push,
         create_pr=args.pr,
     )
