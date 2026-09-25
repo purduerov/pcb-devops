@@ -434,12 +434,11 @@ def _run_kicad_validation(project_dir: Path, project_file: Path | None) -> list[
     with tempfile.TemporaryDirectory(prefix="rov-validate-") as report_dir:
         for name, subcommand, action, report_name, target in checks:
             if target is None or not target.is_file():
-                expected = f"{project_file.stem}.kicad_{'sch' if name == 'erc' else 'pcb'}"
                 results.append(
                     CheckResult(
                         name,
                         rov_core.STATUS_BLOCKED,
-                        f"Full validation needs {expected} next to the project file.",
+                        _missing_design_file_message(name, project_file),
                     )
                 )
                 continue
@@ -447,6 +446,25 @@ def _run_kicad_validation(project_dir: Path, project_file: Path | None) -> list[
                 _kicad_check(executable, name, subcommand, action, Path(report_dir) / report_name, target)
             )
     return results
+
+
+def _missing_design_file_message(name: str, project_file: Path | None) -> str:
+    """Explain which design file a kicad-cli check needs and could not find.
+
+    ``project_file`` is None when the board has no ``*.kicad_pro`` at all, so the
+    missing name is never derived from it: full validation reports BLOCKED for
+    each check instead of failing on a missing project file.
+    """
+    suffix = ".kicad_sch" if name == "erc" else ".kicad_pcb"
+    if project_file is None:
+        return (
+            f"Full validation needs a single *.kicad_pro project file, with its "
+            f"{suffix} design file beside it, before {name.upper()} can run."
+        )
+    return (
+        f"Full validation needs {project_file.stem}{suffix} next to "
+        f"{project_file.name} before {name.upper()} can run."
+    )
 
 
 def _kicad_check(

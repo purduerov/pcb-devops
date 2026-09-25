@@ -73,11 +73,13 @@ _BOOTSTRAP_STATUS_PRECEDENCE = (STATUS_FAIL, STATUS_BLOCKED, STATUS_WARN, STATUS
 # a pass by one interface and as a failure by another.
 _STATUS_PREFIX_PATTERN = re.compile(r"^\[(PASS|WARN|FAIL|BLOCKED)\][ \t]*(.*)$", re.DOTALL)
 
-# Unresolved Git conflict markers are matched exactly like the CI grep: anchored
-# to the start of a line, so legitimate runs of '=' inside design data are not
-# reported. The checked file set is the same one CI scans.
+# Unresolved Git conflict markers are matched exactly like the CI grep in
+# .github/workflows/run-kicad-ci.yml: anchored to the start of a line, so
+# legitimate runs of '=' inside design data are not reported. The checked file
+# set is the same --include list CI uses, so a file CI scans is never skipped
+# locally and vice versa.
 CONFLICT_MARKER_PATTERN = re.compile(r"^(<{7}|={7}|>{7})", re.MULTILINE)
-CONFLICT_CHECK_PATTERNS = ("*.kicad_sch", "*.kicad_pcb", "*.kicad_pro", "*-lib-table")
+CONFLICT_CHECK_PATTERNS = ("*.kicad_*", "*-lib-table")
 
 # Characters that are illegal in a Windows or POSIX file name. They are replaced
 # rather than rejected so a friendlier name such as "X19: Control" still works.

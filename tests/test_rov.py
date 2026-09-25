@@ -152,6 +152,71 @@ def recording_launch(returncode=0):
     return calls, fake
 
 
+# Git is never allowed to run for real: a real ``git submodule update`` or
+# ``git fetch`` would reach the network, and a real ``git reset`` would touch a
+# developer's work tree. Every test that can reach Git patches
+# ``rov_core.run_git``, the single seam all Git access goes through.
+FORBIDDEN_GIT_VERBS = frozenset(
+    {
+        "fetch",
+        "merge",
+        "push",
+        "submodule",
+        "checkout",
+        "switch",
+        "reset",
+        "restore",
+        "stash",
+        "clean",
+        "rm",
+        "commit",
+    }
+)
+
+
+def read_only_git(stdout_for_rev_parse="false"):
+    """Return ``(calls, fake)``: Git reads are answered, any write raises.
+
+    ``rev-parse`` reports ``stdout_for_rev_parse``, so a temporary directory
+    behaves like a non-repository without Git ever running. The write verbs are
+    refused so a test fails loudly instead of touching a remote or a work tree.
+    """
+    calls: list[tuple] = []
+
+    def fake(repo_dir, *args, check=False):
+        calls.append(tuple(args))
+        if args and args[0] in FORBIDDEN_GIT_VERBS:
+            raise AssertionError(f"tests must not run 'git {args[0]}': {args}")
+        if args[:1] == ("rev-parse",):
+            return completed(0, stdout_for_rev_parse)
+        return completed(0)
+
+    return calls, fake
+
+
+def no_git():
+    """Refuse every Git command outright."""
+    return patch.object(
+        rov_core, "run_git", side_effect=AssertionError("tests must not run git")
+    )
+
+
+def no_kicad_cli():
+    """Let the fast checks run their tools but refuse to start kicad-cli.
+
+    KiCad is never launched in a unit test. The symbol linter still runs
+    because it is a plain Python script, which keeps the assertion specific:
+    only the kicad-cli ERC and DRC invocations are refused.
+    """
+
+    def fake(command, cwd=None, timeout=None):
+        if any("kicad-cli" in str(part) for part in command):
+            raise AssertionError(f"tests must not start kicad-cli: {command}")
+        return completed(0)
+
+    return patch.object(rov, "_run_tool", fake)
+
+
 class TestDoctor(unittest.TestCase):
     def test_doctor_missing_kicad_is_warning(self):
         with patch.object(rov.shutil, "which", side_effect=lambda name: "/usr/bin/git" if name == "git" else None):
@@ -247,6 +312,37 @@ class TestBoardValidate(unittest.TestCase):
         self.assertIn("Demo-Board.kicad_sch", markers.message)
         self.assertEqual(rov.exit_code_for(results), 1)
 
+    def test_conflict_markers_are_found_in_every_kicad_design_file(self):
+        """The checked file set is the CI include set, so .kicad_dru counts too."""
+        for filename in ("Demo-Board.kicad_dru", "Demo-Board.kicad_mod", "sym-lib-table"):
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_board(Path(tmp))
+                    target = root / filename
+                    if filename == "sym-lib-table":
+                        target.write_text(target.read_text(encoding="utf-8") + "<<<<<<< HEAD\n", encoding="utf-8")
+                    else:
+                        target.write_text("(design)\n=======\n", encoding="utf-8")
+                    with patch.object(rov, "_run_tool", lambda *a, **k: completed(0)):
+                        results = rov.run_board_validate(root)
+                markers = next(r for r in results if r.name == "merge-conflict-markers")
+                self.assertEqual(markers.status, "FAIL", markers.message)
+                self.assertIn(filename, markers.message)
+                self.assertEqual(rov.exit_code_for(results), 1)
+
+    def test_conflict_marker_rule_matches_the_ci_workflow(self):
+        """The shared rule must stay the same rule run-kicad-ci.yml greps for."""
+        workflow = (DEVOPS_DIR / ".github" / "workflows" / "run-kicad-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        for pattern in rov_core.CONFLICT_CHECK_PATTERNS:
+            self.assertIn(f"--include='{pattern}'", workflow)
+        self.assertIn("^(<{7}|={7}|>{7})", workflow)
+        self.assertEqual(
+            rov_core.CONFLICT_MARKER_PATTERN.pattern.replace("(?m)", ""),
+            "^(<{7}|={7}|>{7})",
+        )
+
     def test_multiple_project_files_are_a_warning_not_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
@@ -304,7 +400,7 @@ class TestBoardValidate(unittest.TestCase):
         self.assertEqual(erc.status, "FAIL")
         self.assertEqual(rov.exit_code_for(results), 1)
 
-    def test_full_validation_is_blocked_without_project_files(self):
+    def test_full_validation_is_blocked_without_the_schematic(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
             (root / "Demo-Board.kicad_sch").unlink()
@@ -314,7 +410,57 @@ class TestBoardValidate(unittest.TestCase):
                 results = rov.run_board_validate(root, full=True)
         schematic = next(r for r in results if r.name == "erc")
         self.assertEqual(schematic.status, "BLOCKED")
+        self.assertIn("Demo-Board.kicad_sch", schematic.message)
         self.assertEqual(rov.exit_code_for(results), 2)
+
+    def test_full_validation_is_blocked_without_any_project_file(self):
+        """Regression: a board with no *.kicad_pro must never dereference None.
+
+        kicad-cli is present, so the full path runs and previously crashed with
+        ``AttributeError`` while building the missing-file message.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_board(Path(tmp))
+            (root / "Demo-Board.kicad_pro").unlink()
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/kicad-cli"), no_kicad_cli():
+                results = rov.run_board_validate(root, full=True)
+        kicad_results = [r for r in results if r.name in ("erc", "drc")]
+        self.assertEqual([r.name for r in kicad_results], ["erc", "drc"])
+        for result in kicad_results:
+            self.assertEqual(result.status, "BLOCKED", result.message)
+            self.assertIn("*.kicad_pro", result.message)
+        # The kicad-cli checks are BLOCKED, which is exit code 2. The missing
+        # required project file is itself a FAIL, and FAIL outranks BLOCKED, so
+        # the command as a whole reports 1 and says why.
+        self.assertEqual(rov.exit_code_for(kicad_results), 2)
+        self.assertEqual(rov.exit_code_for(results), 1)
+        project = next(r for r in results if r.name == "project-file")
+        self.assertEqual(project.status, "FAIL")
+
+    def test_full_validation_blocked_missing_project_file_through_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_board(Path(tmp))
+            for name in ("Demo-Board.kicad_pro", "Demo-Board.kicad_sch", "Demo-Board.kicad_pcb"):
+                (root / name).unlink()
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/kicad-cli"), no_kicad_cli(), redirect_stdout(
+                io.StringIO()
+            ) as buffer:
+                code = rov.main(["board", "validate", "--full", "--project-dir", str(root)])
+        self.assertEqual(code, 1)
+        self.assertEqual(buffer.getvalue().count("[BLOCKED] erc"), 1)
+        self.assertEqual(buffer.getvalue().count("[BLOCKED] drc"), 1)
+        # The hook never starts KiCad, so a board with no design file at all is
+        # still reported as one FAIL rather than two BLOCKED results.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_board(Path(tmp))
+            for name in ("Demo-Board.kicad_pro", "Demo-Board.kicad_sch", "Demo-Board.kicad_pcb"):
+                (root / name).unlink()
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/kicad-cli"), no_kicad_cli(), redirect_stdout(
+                io.StringIO()
+            ) as hook_buffer:
+                hook_code = rov.main(["board", "validate", "--hook", "--project-dir", str(root)])
+        self.assertEqual(hook_code, 1)
+        self.assertNotIn("[BLOCKED] erc", hook_buffer.getvalue())
 
     def test_hook_mode_runs_fast_validation_only(self):
         with patch.object(
@@ -391,7 +537,7 @@ class TestLibraryCommands(unittest.TestCase):
     def test_library_sync_is_blocked_outside_a_git_worktree(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             rov.shutil, "which", return_value="/usr/bin/git"
-        ), patch.object(rov_core, "is_git_worktree", return_value=False):
+        ), no_git(), patch.object(rov_core, "is_git_worktree", return_value=False):
             result = rov.run_library_sync(Path(tmp))
         self.assertEqual(result.status, "BLOCKED")
 
@@ -555,26 +701,29 @@ class TestBoardSyncLibrary(unittest.TestCase):
         return planner
 
     def test_sync_library_is_blocked_before_the_planner_exists(self):
-        self.assertFalse(
-            hasattr(rov_core, "plan_library_update"),
-            "this task must not implement the Task 4 planner",
-        )
+        """A missing planner is BLOCKED, not an AttributeError.
+
+        The planner attribute is patched to ``None`` instead of asserting it is
+        absent, so this test keeps its meaning once Task 4 adds the real
+        function to ``rov_core``.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
-            with patch.object(rov.shutil, "which", return_value="/usr/bin/git"), patch.object(
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/git"), no_git(), patch.object(
                 rov_core, "is_git_worktree", return_value=True
-            ), patch.object(rov_core, "is_clean_worktree", return_value=True), redirect_stdout(
-                io.StringIO()
-            ):
+            ), patch.object(rov_core, "is_clean_worktree", return_value=True), patch.object(
+                rov_core, "plan_library_update", None, create=True
+            ), redirect_stdout(io.StringIO()) as buffer:
                 code = rov.main(["board", "sync-library", "--project-dir", str(root)])
         self.assertEqual(code, 2)
+        self.assertIn("not available in this build", buffer.getvalue())
 
     def test_sync_library_dry_run_changes_nothing(self):
         calls: list[tuple] = []
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
             buffer = io.StringIO()
-            with patch.object(rov.shutil, "which", return_value="/usr/bin/git"), patch.object(
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/git"), no_git(), patch.object(
                 rov_core, "is_git_worktree", return_value=True
             ), patch.object(rov_core, "is_clean_worktree", return_value=True), patch.object(
                 rov_core, "plan_library_update", self.fake_plan(calls), create=True
@@ -596,7 +745,7 @@ class TestBoardSyncLibrary(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
             buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            with no_git(), redirect_stdout(buffer):
                 code = rov.main(
                     [
                         "board",
@@ -614,7 +763,7 @@ class TestBoardSyncLibrary(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
             buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            with no_git(), redirect_stdout(buffer):
                 code = rov.main(
                     ["board", "sync-library", "--project-dir", str(root), "--apply", "--pr"]
                 )
@@ -624,7 +773,7 @@ class TestBoardSyncLibrary(unittest.TestCase):
     def test_sync_library_blocks_a_dirty_board(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_board(Path(tmp))
-            with patch.object(rov.shutil, "which", return_value="/usr/bin/git"), patch.object(
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/git"), no_git(), patch.object(
                 rov_core, "is_git_worktree", return_value=True
             ), patch.object(rov_core, "is_clean_worktree", return_value=False), redirect_stdout(
                 io.StringIO()
@@ -654,12 +803,27 @@ class TestBoardBootstrap(unittest.TestCase):
             root.mkdir()
             self.make_template(root)
             buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            with patch.object(rov_core, "run_git", read_only_git()[1]), redirect_stdout(buffer):
                 code = rov.main(["board", "bootstrap", "--project-dir", str(root), "--non-interactive"])
             self.assertEqual(code, 0, buffer.getvalue())
             self.assertTrue((root / "Demo-Board.kicad_pro").is_file())
             config = json.loads((root / "rov.project.json").read_text(encoding="utf-8"))
             self.assertEqual(config["project_name"], "Demo-Board")
+
+    def test_bootstrap_never_uses_an_unrecorded_git_command(self):
+        """The Git seam is the only way bootstrap reaches Git, and it stays read-only."""
+        calls, fake = read_only_git()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Demo-Board"
+            root.mkdir()
+            self.make_template(root)
+            with patch.object(rov_core, "run_git", fake), redirect_stdout(io.StringIO()):
+                code = rov.main(["board", "bootstrap", "--project-dir", str(root)])
+        self.assertEqual(code, 0)
+        self.assertTrue(calls, "the Git seam must be exercised, not bypassed")
+        verbs = {call[0] for call in calls if call}
+        self.assertEqual(verbs & FORBIDDEN_GIT_VERBS, set())
+        self.assertEqual(verbs, {"rev-parse"})
 
     def test_bootstrap_rejects_an_unusable_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -667,7 +831,7 @@ class TestBoardBootstrap(unittest.TestCase):
             root.mkdir()
             self.make_template(root)
             buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            with no_git(), redirect_stdout(buffer):
                 code = rov.main(
                     ["board", "bootstrap", "--project-dir", str(root), "--project-name", "../escape"]
                 )
