@@ -16,14 +16,14 @@ git config filter.kicad_project_cleaner.clean "sed -E -e 's/^update=.*$/update=D
 git config filter.kicad_project_cleaner.smudge "cat"
 
 # 4. Git Hooks Configuration
-if [ -d ".githooks" ]; then
-    git config core.hooksPath .githooks
-    echo "Git hooks path configured to .githooks"
-fi
+# The Git hook path is owned by "rov board bootstrap", which installs the
+# untracked .rov-hooks directory. This script must not point Git at the
+# tracked .githooks directory of the board template.
+echo "Git hook path is managed by 'rov board bootstrap' (.rov-hooks)."
 
 # 5. Automatic Submodule Updates Configuration
 git config submodule.recurse true
 git config checkout.recurse true
 echo "Git configured to automatically pull and update submodules recursively."
 
-echo "Git filters, hooks, and submodules configured successfully!"
+echo "Git filters and submodules configured successfully!"

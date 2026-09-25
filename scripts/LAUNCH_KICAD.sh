@@ -14,62 +14,28 @@ echo "  🚀 Purdue ROV - KiCad Launch & Sync System"
 echo "============================================================"
 echo ""
 
-# 1. Git hooks & submodule configuration
-echo "[1/5] ⚙️  Configuring Git environment..."
-git config core.hooksPath .githooks >/dev/null 2>&1 || true
+# 1. Git environment configuration. The Git hook path is owned by
+# "rov board bootstrap", which installs the untracked .rov-hooks directory.
+echo "[1/3] Configuring Git environment..."
 git config submodule.recurse true >/dev/null 2>&1 || true
 
-# 2. Check internet connectivity (robust across macOS and Linux)
-IS_ONLINE=0
-if curl -s --head --connect-timeout 3 https://github.com >/dev/null 2>&1; then
-    IS_ONLINE=1
-elif ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-    IS_ONLINE=1
-fi
-
-# 3. Pull & Sync
-if [ "$IS_ONLINE" -eq 1 ]; then
-    echo "[2/5] 📥 Pulling latest board design updates..."
-    if git pull --rebase --autostash --quiet >/dev/null 2>&1 || git pull --no-rebase --quiet >/dev/null 2>&1; then
-        echo "     ✅ Board repository up to date."
-    else
-        echo "     ⚠️  Note: Could not automatically pull board updates (check local changes)."
-    fi
-
-    echo "[3/5] 📚 Updating Purdue ROV component library (submodule)..."
-    git submodule sync --quiet >/dev/null 2>&1 || true
-    git submodule update --init --recursive --quiet >/dev/null 2>&1 || true
-    if [ -d "libs/purdue-rov-kicad-lib" ]; then
-        git -C libs/purdue-rov-kicad-lib config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
-        git -C libs/purdue-rov-kicad-lib fetch origin master --quiet >/dev/null 2>&1 || true
-        git -C libs/purdue-rov-kicad-lib checkout -B master origin/master --quiet >/dev/null 2>&1 || true
-        git -C libs/purdue-rov-kicad-lib reset --hard origin/master --quiet >/dev/null 2>&1 || true
-        echo "     ✅ Component library updated to latest master."
-    else
-        echo "     ℹ️  No submodule found at libs/purdue-rov-kicad-lib."
-    fi
+# 2. Prepare the board through the shared bootstrap: rename starter design
+# files, write rov.project.json, add standard library table entries, prepare
+# the library submodule, and install the untracked hook. The bootstrap never
+# resets, stashes, or overwrites local work.
+echo "[2/3] Preparing board project, library tables, submodule, and hooks..."
+ROV_CLI="$SCRIPT_DIR/rov.py"
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$ROV_CLI" board bootstrap --project-dir "$TARGET_DIR" --non-interactive
+elif command -v python >/dev/null 2>&1; then
+    python "$ROV_CLI" board bootstrap --project-dir "$TARGET_DIR" --non-interactive
 else
-    echo "[2/5] 🌐 Offline mode detected: Skipping remote sync."
-    echo "[3/5] 📦 Checking local library submodule..."
-    git submodule sync --quiet >/dev/null 2>&1 || true
-    git submodule update --init --recursive --quiet >/dev/null 2>&1 || true
+    echo "Python is required to prepare this board." >&2
+    exit 2
 fi
 
-# 4. Verify & Synchronize sym-lib-table and fp-lib-table
-echo "[4/5] 🔧 Verifying KiCad symbol and footprint library tables..."
-SYNC_SCRIPT="$SCRIPT_DIR/sync_project_libs.py"
-if [ -f "$SYNC_SCRIPT" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-        python3 "$SYNC_SCRIPT" "$TARGET_DIR" || true
-    elif command -v python >/dev/null 2>&1; then
-        python "$SYNC_SCRIPT" "$TARGET_DIR" || true
-    else
-        echo "     ℹ️  Python not found; skipping automated library table check."
-    fi
-fi
-
-# 5. Locate and Launch KiCad Project
-echo "[5/5] 🚀 Launching KiCad..."
+# 3. Locate and Launch KiCad Project
+echo "[3/3] Launching KiCad..."
 PROJ=""
 for f in *.kicad_pro; do
     if [ -f "$f" ]; then
