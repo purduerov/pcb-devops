@@ -10,6 +10,9 @@ Ensures project sym-lib-table and fp-lib-table contain all 6 central Purdue ROV 
 
 Also ensures .gitmodules tracks the master branch for purdue-rov-kicad-lib.
 Preserves existing custom/project-specific libraries.
+
+The standard library list comes from rov_core.STANDARD_LIBS, the shared platform
+contract used by the CLI, bootstrap flow, and Library Manager GUI.
 """
 
 import sys
@@ -17,50 +20,8 @@ import os
 import re
 from pathlib import Path
 
-STANDARD_LIBS = [
-    {
-        "name": "rov_passives",
-        "sym_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_passives.kicad_sym",
-        "fp_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Footprints/rov_passives.pretty",
-        "sym_descr": "Purdue ROV Passives Symbols",
-        "fp_descr": "Purdue ROV Passives Footprints",
-    },
-    {
-        "name": "rov_power",
-        "sym_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_power.kicad_sym",
-        "fp_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Footprints/rov_power.pretty",
-        "sym_descr": "Purdue ROV Power Symbols",
-        "fp_descr": "Purdue ROV Power Footprints",
-    },
-    {
-        "name": "rov_logic",
-        "sym_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_logic.kicad_sym",
-        "fp_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Footprints/rov_logic.pretty",
-        "sym_descr": "Purdue ROV Logic Symbols",
-        "fp_descr": "Purdue ROV Logic Footprints",
-    },
-    {
-        "name": "rov_connectors",
-        "sym_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_connectors.kicad_sym",
-        "fp_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Footprints/rov_connectors.pretty",
-        "sym_descr": "Purdue ROV Connectors Symbols",
-        "fp_descr": "Purdue ROV Connectors Footprints",
-    },
-    {
-        "name": "rov_sensors",
-        "sym_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_sensors.kicad_sym",
-        "fp_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Footprints/rov_sensors.pretty",
-        "sym_descr": "Purdue ROV Sensors Symbols",
-        "fp_descr": "Purdue ROV Sensors Footprints",
-    },
-    {
-        "name": "rov_mech",
-        "sym_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_mech.kicad_sym",
-        "fp_uri": "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Footprints/rov_mech.pretty",
-        "sym_descr": "Purdue ROV Mechanical Symbols",
-        "fp_descr": "Purdue ROV Mechanical Footprints",
-    },
-]
+from rov_core import STANDARD_LIBS
+
 
 def sync_lib_table(table_path, table_type="sym"):
     root_tag = "sym_lib_table" if table_type == "sym" else "fp_lib_table"
