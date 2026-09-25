@@ -14,6 +14,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -43,12 +45,23 @@ PROTECTED_BRANCHES = frozenset({"master", "main", "develop", "development", "rel
 DEFAULT_REMOTE = "origin"
 GITHUB_CLI = "gh"
 
+# Library contribution contract. ``LIBRARY_CONTRIBUTION_PATHS`` is the closed set
+# of directories a part contribution may stage: a change anywhere else is
+# refused rather than swept into the commit. ``CONTRIBUTION_BRANCH_PREFIX`` is the
+# reviewable branch every contribution lands on, so a protected branch is never
+# committed to or pushed by this flow.
+LIBRARY_CONTRIBUTION_PATHS = ("Symbols", "Footprints", "3D_Models", "Design_Blocks")
+CONTRIBUTION_BRANCH_PREFIX = "add-part-"
+LIBRARY_CONTRIBUTE_CHECK = "library-contribute"
+CONTRIBUTION_LINTER_FILE = "linter_validator.py"
+
 # A library fetch is the only command that can leave the machine. It is bounded
 # so an unreachable or hanging remote reports a blocked plan instead of hanging a
 # board; the GitHub CLI calls made while publishing a pull request are bounded
 # the same way.
 LIBRARY_FETCH_TIMEOUT_SECONDS = 60
 GITHUB_CLI_TIMEOUT_SECONDS = 120
+LINTER_TIMEOUT_SECONDS = 300
 
 # The single wording for a rewritten remote library history. It is a contract:
 # the CLI prints it verbatim and CI can match on it.
@@ -1065,6 +1078,390 @@ def _pull_request_url(stdout: str) -> str:
         if line.startswith("http"):
             return line
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Library contribution preparation
+# ---------------------------------------------------------------------------
+
+
+def prepare_library_contribution(
+    library_dir: Path,
+    component_name: str,
+    category: str,
+    push: bool = False,
+    create_pr: bool = False,
+) -> CheckResult:
+    """Turn local library changes into a reviewable branch and pull request.
+
+    The order of the steps is the safety contract:
+
+    1. an unusable request is refused before the repository is read, and
+       ``create_pr`` without ``push`` is refused rather than silently reduced to
+       a local commit, because a pull request needs a published branch,
+    2. the library's own metadata linter runs first, so a non-compliant part is a
+       FAIL that leaves no branch behind,
+    3. ``git status --porcelain`` decides what is contributed, and a change
+       outside ``LIBRARY_CONTRIBUTION_PATHS`` is BLOCKED instead of being
+       committed, so a contribution can never sweep up unrelated work,
+    4. the new ``add-part-<slug>-<timestamp>`` branch is created from the current
+       branch and stays checked out; a protected branch is never committed to,
+       never pushed, and never re-checked out afterwards,
+    5. only the four allowed directories are staged, and the staged set is
+       re-read and re-checked before the commit, and
+    6. the branch is pushed and the pull request opened only when the caller
+       passes ``push=True`` and ``create_pr=True``.
+
+    Nothing here resets, stashes, or discards a developer's work, and no command
+    in this flow names a protected branch as a push or commit target.
+    """
+    library = Path(library_dir)
+    name = LIBRARY_CONTRIBUTE_CHECK
+
+    component = (component_name or "").strip()
+    part_category = (category or "").strip()
+    if not component or not part_category:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            "a part name and a category are both required, for example 'rov library "
+            "contribute --name TPS54302 --category Power'.",
+        )
+    if create_pr and not push:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            "a pull request can only be opened for a branch that was pushed, so "
+            "create_pr requires push=True. The protected base branch is never "
+            "pushed, so re-run with push=True to open a reviewable pull request.",
+        )
+    if not _git_is_available():
+        return CheckResult(name, STATUS_BLOCKED, "Git is unavailable, so nothing was changed.")
+    if not library.is_dir():
+        return CheckResult(
+            name, STATUS_BLOCKED, f"{library} does not exist, so nothing was changed."
+        )
+    if not is_git_worktree(library):
+        return CheckResult(
+            name, STATUS_BLOCKED, f"{library} is not a Git work tree, so nothing was changed."
+        )
+
+    linted = _run_contribution_linter(library)
+    if linted is not None:
+        return linted
+
+    status = run_git(library, "status", "--porcelain")
+    if status.returncode != 0:
+        return CheckResult(
+            name, STATUS_BLOCKED, f"could not read the library status: {_git_detail(status)}"
+        )
+    changed = _porcelain_paths(status.stdout)
+    if not changed:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"there are no local changes in {library} to contribute. Import or edit a "
+            "part first, then run this command again.",
+        )
+    outside = [path for path in changed if not _is_contribution_path(path)]
+    if outside:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"these changes are outside the library directories and were not staged: "
+            f"{', '.join(outside)}. A contribution may only stage "
+            f"{', '.join(LIBRARY_CONTRIBUTION_PATHS)}. Commit or stash the other "
+            "changes yourself, then run this command again.",
+        )
+
+    base = current_branch(library)
+    if not base:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            "HEAD is detached, so no contribution branch could be created from it. "
+            f"Check out {LIBRARY_BRANCH} and run this command again.",
+        )
+    branch = f"{CONTRIBUTION_BRANCH_PREFIX}{_contribution_slug(component)}-{int(time.time()) % 100000}"
+    if branch in PROTECTED_BRANCHES:  # pragma: no cover - the prefix makes this unreachable
+        return CheckResult(
+            name, STATUS_BLOCKED, f"refusing to use the protected branch {branch}."
+        )
+    created = run_git(library, "switch", "-c", branch, base)
+    if created.returncode != 0:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"could not create the contribution branch {branch} from {base}: "
+            f"{_git_detail(created)}",
+        )
+
+    staged_result = _stage_contribution_paths(library)
+    if isinstance(staged_result, CheckResult):
+        return staged_result
+    staged = staged_result
+    if not staged:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"no changes under {', '.join(LIBRARY_CONTRIBUTION_PATHS)} were staged on "
+            f"{branch}, so nothing was committed.",
+        )
+
+    message = f"feat(parts): add {component} to {part_category}"
+    committed = run_git(library, "commit", "-m", message)
+    if committed.returncode != 0:
+        return CheckResult(
+            name,
+            STATUS_BLOCKED,
+            f"could not commit the contribution on {branch}: {_git_detail(committed)}",
+        )
+    commit = _git_output(library, "rev-parse", "HEAD")
+    if not commit:
+        return CheckResult(
+            name, STATUS_BLOCKED, f"could not resolve the commit on {branch}."
+        )
+
+    pull_request_url = ""
+    if push:
+        published = _publish_contribution_branch(library, branch, commit, message, create_pr)
+        if isinstance(published, CheckResult):
+            return published
+        pull_request_url = published
+
+    summary = (
+        f"prepared {branch} from {base} with {len(staged)} library file(s) in commit "
+        f"{commit[:12]}: {message}. The protected {base} branch was not changed and "
+        f"the local checkout stays on {branch}."
+    )
+    if pull_request_url:
+        summary = f"{summary} Pull request: {pull_request_url}"
+    return CheckResult(name, STATUS_PASS, summary)
+
+
+def _run_contribution_linter(library: Path) -> CheckResult | None:
+    """Validate the library's symbol metadata; return a result or None on success.
+
+    The library owns its own linter, so the same script the GUI and
+    ``rov library validate`` run is used here. A non-zero exit is a FAIL rather
+    than a BLOCKED one: the request is valid, the content is not.
+    """
+    linter = library / "scripts" / CONTRIBUTION_LINTER_FILE
+    if not linter.is_file():
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"{CONTRIBUTION_LINTER_FILE} was not found in {library / 'scripts'}, so "
+            "the part metadata was not checked.",
+        )
+    symbols = library / "Symbols"
+    if not symbols.is_dir():
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"{symbols} does not exist, so the part metadata was not checked.",
+        )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(linter), str(symbols)],
+            cwd=str(library),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=LINTER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"{CONTRIBUTION_LINTER_FILE} did not finish within {LINTER_TIMEOUT_SECONDS} "
+            f"seconds, so {symbols} was not validated and nothing was committed.",
+        )
+    except OSError as exc:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"{CONTRIBUTION_LINTER_FILE} could not be run: {exc}",
+        )
+    if result.returncode == 0:
+        return None
+    detail = _output_detail(result, f"exit status {result.returncode}")
+    return CheckResult(
+        LIBRARY_CONTRIBUTE_CHECK,
+        STATUS_FAIL,
+        f"{CONTRIBUTION_LINTER_FILE} found metadata problems in {symbols} and exited "
+        f"with status {result.returncode}: {detail}. Nothing was committed.",
+    )
+
+
+def _porcelain_paths(porcelain: str) -> list[str]:
+    """Return the changed paths in ``git status --porcelain`` output.
+
+    Each record is a two-character status code, a space, and a path. A rename
+    carries ``old -> new``, and the new path is the one that has to be allowed,
+    and a quoted path is unquoted so a space in a part name is compared whole.
+    """
+    paths: list[str] = []
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        entry = line[3:].strip()
+        if " -> " in entry:
+            entry = entry.split(" -> ", 1)[1].strip()
+        normalized = _normalize_reported_path(entry)
+        if normalized:
+            paths.append(normalized)
+    return paths
+
+
+def _name_only_paths(porcelain: str) -> tuple[str, ...]:
+    """Return the paths in ``git diff --name-only`` output.
+
+    That output is a bare path per line with no status code, so it is parsed
+    separately from ``git status --porcelain`` instead of reusing its offset.
+    """
+    return tuple(
+        normalized
+        for line in porcelain.splitlines()
+        if (normalized := _normalize_reported_path(line.strip()))
+    )
+
+
+def _normalize_reported_path(entry: str) -> str:
+    """Return one Git-reported path as a trimmed, forward-slash relative path."""
+    if len(entry) >= 2 and entry.startswith('"') and entry.endswith('"'):
+        entry = entry[1:-1]
+    entry = entry.replace("\\", "/").strip()
+    return entry if entry and entry != "." else ""
+
+
+def _is_contribution_path(path: str) -> bool:
+    """Return True when ``path`` is inside an allowed contribution directory."""
+    return path.split("/", 1)[0] in LIBRARY_CONTRIBUTION_PATHS
+
+
+def _contribution_slug(component_name: str) -> str:
+    """Return a branch-safe, lowercase slug for a manufacturer part number."""
+    slug = re.sub(r"[^a-z0-9]+", "-", component_name.lower()).strip("-")
+    return slug or "part"
+
+
+def _stage_contribution_paths(library: Path) -> tuple[str, ...] | CheckResult:
+    """Stage only the allowed library directories and return the staged paths.
+
+    Directories that do not exist are skipped rather than passed to ``git add``,
+    which would fail on an unmatched pathspec, and the staged set is re-read and
+    re-checked so a pre-staged file outside the allowed directories can never be
+    swept into the commit.
+    """
+    present = [name for name in LIBRARY_CONTRIBUTION_PATHS if (library / name).is_dir()]
+    if not present:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"none of {', '.join(LIBRARY_CONTRIBUTION_PATHS)} exist in {library}, so "
+            "nothing could be staged.",
+        )
+    staged_result = run_git(library, "add", "--", *present)
+    if staged_result.returncode != 0:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"could not stage {', '.join(present)}: {_git_detail(staged_result)}",
+        )
+    staged = _name_only_paths(run_git(library, "diff", "--cached", "--name-only").stdout)
+    outside = [path for path in staged if not _is_contribution_path(path)]
+    if outside:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            "refusing to commit staged changes outside the library directories: "
+            f"{', '.join(outside)}.",
+        )
+    return staged
+
+
+def _publish_contribution_branch(
+    library: Path, branch: str, commit: str, message: str, create_pr: bool
+) -> CheckResult | str:
+    """Push the contribution branch and optionally open one pull request.
+
+    Returns the pull request URL, or a BLOCKED result. The push names the new
+    branch explicitly, so a protected branch can never be a target, and a remote
+    branch that already holds a different commit is reported instead of being
+    overwritten. A pull request is only looked up when one is requested, so
+    pushing a branch never depends on the GitHub CLI being installed.
+    """
+    if create_pr and not _gh_is_available():
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"the local branch {branch} was prepared, but {GITHUB_CLI} was not found on "
+            "PATH, so nothing was pushed. Install and authenticate the GitHub CLI, or "
+            f"push {branch} yourself and open the pull request in the browser.",
+        )
+
+    remote_commit = _remote_branch_commit(library, DEFAULT_REMOTE, branch)
+    if remote_commit and remote_commit != commit:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"{DEFAULT_REMOTE}/{branch} already points at {remote_commit}, which is not "
+            f"the prepared commit {commit}, so nothing was pushed. Resolve that branch "
+            "before running the contribution again.",
+        )
+    if not remote_commit:
+        pushed = run_git(library, "push", "-u", DEFAULT_REMOTE, branch)
+        if pushed.returncode != 0:
+            return CheckResult(
+                LIBRARY_CONTRIBUTE_CHECK,
+                STATUS_BLOCKED,
+                f"could not push {branch} to {DEFAULT_REMOTE}: {_git_detail(pushed)}. "
+                f"The commit is kept on {branch} locally.",
+            )
+
+    if not create_pr:
+        return ""
+    existing_url = _existing_pull_request_url(library, branch)
+    if existing_url:
+        return existing_url
+
+    created = _run_gh(
+        [
+            "pr",
+            "create",
+            "--base",
+            LIBRARY_BRANCH,
+            "--head",
+            branch,
+            "--title",
+            message,
+            "--body",
+            _contribution_body(message),
+        ],
+        cwd=library,
+        timeout=GITHUB_CLI_TIMEOUT_SECONDS,
+    )
+    if created.returncode != 0:
+        return CheckResult(
+            LIBRARY_CONTRIBUTE_CHECK,
+            STATUS_BLOCKED,
+            f"{branch} was pushed, but {GITHUB_CLI} could not open the pull request: "
+            f"{_output_detail(created, f'{GITHUB_CLI} pr create failed')}. The branch is "
+            "published; open the pull request from GitHub.",
+        )
+    return _pull_request_url(created.stdout)
+
+
+def _contribution_body(message: str) -> str:
+    """Return the pull request body describing a part contribution."""
+    return (
+        f"{message}\n\n"
+        "Prepared by `rov library contribute`, which validated the symbol metadata and "
+        f"staged only {', '.join(LIBRARY_CONTRIBUTION_PATHS)}.\n"
+    )
 
 
 # ---------------------------------------------------------------------------

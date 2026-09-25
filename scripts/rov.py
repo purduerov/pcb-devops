@@ -919,6 +919,29 @@ def run_library_import(library_dir: Path, arguments: list[str]) -> int:
     return _launch_tool([sys.executable, str(script), *arguments], library)
 
 
+def run_library_contribute(
+    library_dir: Path,
+    component_name: str,
+    category: str,
+    push: bool = False,
+    create_pr: bool = False,
+) -> CheckResult:
+    """Prepare a branch, push, and pull request for a new library part.
+
+    The work is done by ``rov_core``, so the Library Manager GUI, this CLI, and
+    any future caller share one implementation of the branch, staging, and
+    protected-branch rules. The protected library branch is never a commit or
+    push target here.
+    """
+    return rov_core.prepare_library_contribution(
+        Path(library_dir),
+        component_name,
+        category,
+        push=push,
+        create_pr=create_pr,
+    )
+
+
 def _library_script(library_dir: Path, name: str) -> Path | None:
     """Return a library script when it exists."""
     script = Path(library_dir) / "scripts" / name
@@ -1224,13 +1247,12 @@ def _cmd_library_import(args: argparse.Namespace) -> int:
 
 def _cmd_library_contribute(args: argparse.Namespace) -> int:
     return _report_single(
-        CheckResult(
-            "library-contribute",
-            rov_core.STATUS_BLOCKED,
-            "Library contribution preparation is not available in this build of rov. "
-            "Until it lands, edit the parts under Symbols/, run 'rov library validate' "
-            "and 'rov library build', then commit them on a feature branch yourself. "
-            "The Library Manager GUI stays available through 'rov library gui'.",
+        run_library_contribute(
+            _library_dir(args),
+            args.name or "",
+            args.category or "",
+            push=args.push,
+            create_pr=args.pr,
         )
     )
 

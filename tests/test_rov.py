@@ -678,13 +678,47 @@ class TestLibraryCommands(unittest.TestCase):
             with patch.object(rov, "_launch_tool", return_value=3):
                 self.assertEqual(rov.main(["library", "gui", "--library-dir", str(library)]), 3)
 
-    def test_library_contribute_is_blocked_until_it_is_implemented(self):
-        buffer = io.StringIO()
-        with redirect_stdout(buffer):
-            code = rov.main(["library", "contribute", "--name", "TPS54302", "--category", "Power"])
+    def test_library_contribute_delegates_to_the_shared_core(self):
+        """The CLI only parses arguments; the core prepares the contribution."""
+        prepared = rov_core.CheckResult("library-contribute", "PASS", "prepared add-part-tps54302-1")
+        with tempfile.TemporaryDirectory() as tmp:
+            library = Path(tmp)
+            with patch.object(
+                rov, "run_library_contribute", return_value=prepared
+            ) as mock_contribute, redirect_stdout(io.StringIO()) as buffer:
+                code = rov.main([
+                    "library", "contribute",
+                    "--library-dir", str(library),
+                    "--name", "TPS54302",
+                    "--category", "Power",
+                    "--push",
+                    "--pr",
+                ])
+        self.assertEqual(code, 0)
+        self.assertIn("PASS", buffer.getvalue())
+        self.assertEqual(mock_contribute.call_args.args[1:], ("TPS54302", "Power"))
+        self.assertTrue(mock_contribute.call_args.kwargs["push"])
+        self.assertTrue(mock_contribute.call_args.kwargs["create_pr"])
+
+    def test_library_contribute_defaults_to_no_push_and_no_pr(self):
+        """Publishing is opt-in, so a bare invocation never leaves the machine."""
+        prepared = rov_core.CheckResult("library-contribute", "PASS", "prepared add-part-x-1")
+        with patch.object(rov, "run_library_contribute", return_value=prepared) as mock_contribute:
+            with redirect_stdout(io.StringIO()):
+                rov.main(["library", "contribute", "--name", "TPS54302", "--category", "Power"])
+        self.assertFalse(mock_contribute.call_args.kwargs["push"])
+        self.assertFalse(mock_contribute.call_args.kwargs["create_pr"])
+
+    def test_library_contribute_reports_a_blocked_core_result(self):
+        """A refused contribution exits 2 and prints the shared reason."""
+        blocked = rov_core.CheckResult(
+            "library-contribute", rov_core.STATUS_BLOCKED, "changes are outside the library directories"
+        )
+        with patch.object(rov, "run_library_contribute", return_value=blocked):
+            with redirect_stdout(io.StringIO()) as buffer:
+                code = rov.main(["library", "contribute", "--name", "TPS54302", "--category", "Power"])
         self.assertEqual(code, 2)
-        self.assertIn("BLOCKED", buffer.getvalue())
-        self.assertIn("contribute", buffer.getvalue().lower())
+        self.assertIn("outside the library directories", buffer.getvalue())
 
 
 class TestBoardSyncLibrary(unittest.TestCase):
