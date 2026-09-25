@@ -44,12 +44,28 @@ HOOK_FILE_NAME = "pre-commit"
 HOOKS_PATH_CONFIG = HOOKS_DIR_NAME
 CACHED_CLI_RELATIVE_PATH = ".pcb-devops-cache/scripts/rov.py"
 
+# POSIX sh so the hook runs on Linux, macOS, and Git Bash. It resolves an
+# interpreter, never installs one, and exits 0 when the CLI is unavailable so a
+# club member is never locked out of Git. The last command is the CLI call so
+# its exit status becomes the hook's status.
 PRE_COMMIT_HOOK_SCRIPT = """#!/usr/bin/env sh
 repo_root=$(git rev-parse --show-toplevel) || exit 0
 cli="$repo_root/.pcb-devops-cache/scripts/rov.py"
 [ -f "$cli" ] || exit 0
-python "$cli" board validate --project-dir "$repo_root" --hook
+if command -v python3 >/dev/null 2>&1; then
+    rov_python=python3
+elif command -v python >/dev/null 2>&1; then
+    rov_python=python
+else
+    exit 0
+fi
+"$rov_python" "$cli" board validate --project-dir "$repo_root" --hook
 """
+
+# Bootstrap messages are prefixed with a status tag. ``bootstrap_status`` folds
+# them into one result using the same precedence as the CLI exit-code rule:
+# FAIL beats BLOCKED, BLOCKED beats WARN, and WARN beats PASS.
+_BOOTSTRAP_STATUS_PRECEDENCE = (STATUS_FAIL, STATUS_BLOCKED, STATUS_WARN, STATUS_PASS)
 
 # Characters that are illegal in a Windows or POSIX file name. They are replaced
 # rather than rejected so a friendlier name such as "X19: Control" still works.
@@ -265,7 +281,7 @@ def check_submodule(project_dir: Path, config: Mapping[str, object]) -> CheckRes
             "can be resolved.",
         )
 
-    relative_path = configured_path.strip().replace("\\", "/")
+    relative_path = _normalize_relative_path(configured_path)
     library_dir = project_dir / Path(relative_path)
     if not library_dir.is_dir():
         return CheckResult(
@@ -408,6 +424,21 @@ def install_project_hook(project_dir: Path) -> Path:
     return hook_path
 
 
+def bootstrap_status(result: BootstrapResult) -> str:
+    """Return the worst status tag found in ``result.messages``.
+
+    ``BootstrapResult`` is a frozen Task 1 contract with no status field, so the
+    documented ``[PASS]``, ``[WARN]``, ``[FAIL]``, and ``[BLOCKED]`` message
+    prefixes are the single source of truth. Precedence matches the CLI exit
+    code rule: FAIL, then BLOCKED, then WARN. An empty message tuple is PASS.
+    """
+    for status in _BOOTSTRAP_STATUS_PRECEDENCE:
+        prefix = f"[{status}]"
+        if any(message.startswith(prefix) for message in result.messages):
+            return status
+    return STATUS_PASS
+
+
 def default_project_config(project_name: str) -> dict[str, object]:
     """Return the starter manifest content written for a new board."""
     return {
@@ -481,16 +512,28 @@ def _is_own_git_worktree(repo_dir: Path) -> bool:
 def _rename_template_design_files(
     root: Path, name: str, changed: list[Path], messages: list[str]
 ) -> None:
-    """Rename the template design files, never replacing an existing file."""
+    """Rename the template design files, never replacing an existing file.
+
+    A destination whose source is already gone is a board that was bootstrapped
+    before, so it is reported as PASS rather than as a conflict. Only a genuine
+    source-and-destination pair, which means the name was reused by hand, is a
+    WARN.
+    """
     for extension in PROJECT_FILE_EXTENSIONS:
         source = root / f"{TEMPLATE_STEM}{extension}"
         destination = root / f"{name}{extension}"
-        if destination.exists():
+        source_exists = source.is_file()
+        destination_exists = destination.exists()
+        if source_exists and destination_exists:
             messages.append(
                 _note(STATUS_WARN, f"{destination.name} already exists; not overwritten.")
             )
             continue
-        if not source.is_file():
+        if not source_exists:
+            if destination_exists:
+                messages.append(
+                    _note(STATUS_PASS, f"{destination.name} is already bootstrapped.")
+                )
             continue
         try:
             source.replace(destination)
@@ -571,6 +614,8 @@ def _ensure_manifest(
         return default_project_config(name)
 
     current = config.get("project_name")
+    if current == name:
+        return config
     if current != TEMPLATE_STEM:
         messages.append(
             _note(
@@ -580,8 +625,6 @@ def _ensure_manifest(
         )
         return config
 
-    if current == name:
-        return config
     config["project_name"] = name
     try:
         _write_json(config_path, config)
@@ -635,7 +678,15 @@ def _sync_library_tables(root: Path, changed: list[Path], messages: list[str]) -
 def _prepare_library_submodule(
     root: Path, config: Mapping[str, object], messages: list[str]
 ) -> None:
-    """Initialize or fast-forward the library submodule without discarding work."""
+    """Initialize or fast-forward the library submodule without discarding work.
+
+    The declaration of the submodule path is read through the same
+    ``_declared_submodule_paths`` helper that ``check_submodule`` uses, so
+    validation and bootstrap can never disagree about what ``.gitmodules``
+    declares. The statuses differ only because of the role: ``check_submodule``
+    reports a FAIL for the caller of a validate command, while bootstrap must
+    leave an undeclared directory completely untouched and says BLOCKED.
+    """
     relative_path, branch = _library_target(config)
 
     if not _git_is_available():
@@ -643,6 +694,16 @@ def _prepare_library_submodule(
             _note(
                 STATUS_WARN,
                 f"Git is unavailable, so the library submodule at {relative_path} was left untouched.",
+            )
+        )
+        return
+
+    if relative_path not in _declared_submodule_paths(root):
+        messages.append(
+            _note(
+                STATUS_BLOCKED,
+                f"The library submodule path {relative_path} is not declared in .gitmodules, so it "
+                f"was left untouched. Add it with 'git submodule add <url> {relative_path}'.",
             )
         )
         return
@@ -677,6 +738,18 @@ def _prepare_library_submodule(
                 STATUS_WARN,
                 f"The library submodule at {relative_path} is not an initialized Git work "
                 "tree, so it was left untouched. Run 'git submodule update --init --recursive'.",
+            )
+        )
+        return
+
+    checked_out = current_branch(library_dir)
+    if checked_out != branch:
+        where = f"branch {checked_out!r}" if checked_out else "a detached HEAD"
+        messages.append(
+            _note(
+                STATUS_WARN,
+                f"The library submodule at {relative_path} is on {where} instead of {branch!r}, "
+                "so it was left untouched. Check out the library branch and run bootstrap again.",
             )
         )
         return
@@ -732,11 +805,20 @@ def _library_target(config: Mapping[str, object]) -> tuple[str, str]:
     if isinstance(library, Mapping):
         configured_path = library.get("path")
         if isinstance(configured_path, str) and configured_path.strip():
-            relative_path = configured_path.strip().replace("\\", "/")
+            relative_path = _normalize_relative_path(configured_path)
         configured_branch = library.get("branch")
         if isinstance(configured_branch, str) and configured_branch.strip():
             branch = configured_branch.strip()
     return relative_path, branch
+
+
+def _normalize_relative_path(value: str) -> str:
+    """Return a trimmed, forward-slash relative path for a configured path.
+
+    Shared by ``check_submodule`` and the bootstrap flow so both compare the same
+    text against ``.gitmodules`` on every platform.
+    """
+    return value.strip().replace("\\", "/")
 
 
 def _install_hook_step(root: Path, changed: list[Path], messages: list[str]) -> None:
