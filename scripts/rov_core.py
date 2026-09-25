@@ -29,22 +29,27 @@ LIBRARY_UPDATE_POLICY = "pull-request"
 SCHEMA_VERSION = 1
 LIBRARY_SUBMODULE_PATH = "libs/purdue-rov-kicad-lib"
 
+# (nickname, display label). The label is the developer-visible wording used in
+# newly created library tables and must match the established text, which is not
+# always the nickname with its prefix removed (rov_mech is "Mechanical").
+_STANDARD_LIB_LABELS = (
+    ("rov_passives", "Passives"),
+    ("rov_power", "Power"),
+    ("rov_logic", "Logic"),
+    ("rov_connectors", "Connectors"),
+    ("rov_sensors", "Sensors"),
+    ("rov_mech", "Mechanical"),
+)
+
 STANDARD_LIBS = [
     {
         "name": name,
         "sym_uri": f"${{KIPRJMOD}}/{LIBRARY_SUBMODULE_PATH}/Symbols/{name}.kicad_sym",
         "fp_uri": f"${{KIPRJMOD}}/{LIBRARY_SUBMODULE_PATH}/Footprints/{name}.pretty",
-        "sym_descr": f"Purdue ROV {name} Symbols",
-        "fp_descr": f"Purdue ROV {name} Footprints",
+        "sym_descr": f"Purdue ROV {label} Symbols",
+        "fp_descr": f"Purdue ROV {label} Footprints",
     }
-    for name in (
-        "rov_passives",
-        "rov_power",
-        "rov_logic",
-        "rov_connectors",
-        "rov_sensors",
-        "rov_mech",
-    )
+    for name, label in _STANDARD_LIB_LABELS
 ]
 
 

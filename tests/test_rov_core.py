@@ -85,6 +85,63 @@ class TestLibraryContract(unittest.TestCase):
                 f"${{KIPRJMOD}}/libs/purdue-rov-kicad-lib/Footprints/{name}.pretty",
             )
 
+    def test_standard_libs_use_established_display_labels(self):
+        expected = {
+            "rov_passives": "Purdue ROV Passives",
+            "rov_power": "Purdue ROV Power",
+            "rov_logic": "Purdue ROV Logic",
+            "rov_connectors": "Purdue ROV Connectors",
+            "rov_sensors": "Purdue ROV Sensors",
+            "rov_mech": "Purdue ROV Mechanical",
+        }
+        self.assertEqual(
+            {lib["name"]: lib["sym_descr"] for lib in rov_core.STANDARD_LIBS},
+            {name: f"{label} Symbols" for name, label in expected.items()},
+        )
+        self.assertEqual(
+            {lib["name"]: lib["fp_descr"] for lib in rov_core.STANDARD_LIBS},
+            {name: f"{label} Footprints" for name, label in expected.items()},
+        )
+        for lib in rov_core.STANDARD_LIBS:
+            self.assertNotIn(lib["name"], lib["sym_descr"])
+            self.assertNotIn(lib["name"], lib["fp_descr"])
+
+    def test_sync_project_writes_established_descriptions(self):
+        import sync_project_libs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sync_project_libs.sync_project(root)
+            sym_content = (root / "sym-lib-table").read_text(encoding="utf-8")
+            fp_content = (root / "fp-lib-table").read_text(encoding="utf-8")
+            for lib in rov_core.STANDARD_LIBS:
+                self.assertIn(f'(descr "{lib["sym_descr"]}")', sym_content)
+                self.assertIn(f'(descr "{lib["fp_descr"]}")', fp_content)
+            self.assertIn('(descr "Purdue ROV Passives Symbols")', sym_content)
+            self.assertIn('(descr "Purdue ROV Mechanical Symbols")', sym_content)
+            self.assertIn('(descr "Purdue ROV Mechanical Footprints")', fp_content)
+
+    def test_sync_project_does_not_rewrite_existing_entries(self):
+        import sync_project_libs
+
+        existing = (
+            '(sym_lib_table\n'
+            '  (lib (name "rov_passives")(type "KiCad")'
+            '(uri "${KIPRJMOD}/libs/purdue-rov-kicad-lib/Symbols/rov_passives.kicad_sym")'
+            '(options "")(descr "Local board wording"))\n)\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sym-lib-table").write_text(existing, encoding="utf-8")
+
+            result = sync_project_libs.sync_project(root)
+            self.assertTrue(result["sym_changed"])
+            self.assertNotIn("rov_passives", result["sym_added"])
+
+            content = (root / "sym-lib-table").read_text(encoding="utf-8")
+            self.assertIn('(descr "Local board wording")', content)
+            self.assertEqual(content.count('(name "rov_passives")'), 1)
+
     def test_sync_project_output_satisfies_library_table_validation(self):
         import sync_project_libs
 
