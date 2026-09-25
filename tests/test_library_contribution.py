@@ -122,10 +122,17 @@ class LibraryFixture:
         path.write_text(text, encoding="utf-8")
         return path
 
+    def rename_branch(self, old: str, new: str) -> None:
+        """Rename a local branch so a required base can be made unavailable."""
+        run_git(self.library, "branch", "-m", old, new)
+
     # -- observation --------------------------------------------------------
 
     def rev(self, ref: str) -> str:
         return run_git(self.library, "rev-parse", ref)
+
+    def parent_of_head(self) -> str:
+        return run_git(self.library, "rev-parse", "HEAD^")
 
     def branch(self) -> str | None:
         return rov_core.current_branch(self.library)
@@ -343,6 +350,59 @@ class TestPrepareLibraryContribution(unittest.TestCase):
         result = rov_core.prepare_library_contribution(plain, "TPS54302", "Power")
 
         self.assertEqual(result.status, rov_core.STATUS_BLOCKED, result.message)
+
+    def test_a_second_contribution_does_not_stack_on_the_first(self):
+        """A new contribution is based on the protected branch, not the last part branch.
+
+        Re-running the command while an earlier ``add-part-*`` branch is still
+        checked out must not fold the first part into the second pull request, so
+        the new commit's parent is the protected base rather than the previous
+        contribution.
+        """
+        self.fixture.add_part()
+        first, _linter, pushes, gh = self.contribute()
+        self.assertEqual(first.status, rov_core.STATUS_PASS, first.message)
+        first_commit = self.fixture.rev("HEAD")
+        self.assertTrue(self.fixture.branch().startswith("add-part-"))
+        self.assertNotEqual(first_commit, self.fixture.rev("master"))
+
+        self.fixture.add_part("Symbols/parts/power/second-part.kicad_sym")
+        second, _linter, pushes, gh = self.contribute(component_name="TPS54303")
+
+        self.assertEqual(second.status, rov_core.STATUS_PASS, second.message)
+        self.assertTrue(self.fixture.branch().startswith("add-part-tps54303-"))
+        self.assertEqual(
+            self.fixture.parent_of_head(),
+            self.fixture.rev("master"),
+            "a contribution must branch from the protected base, not the previous one",
+        )
+        self.assertNotEqual(self.fixture.parent_of_head(), first_commit)
+        self.assertEqual(self.fixture.rev("master"), self.fixture.baseline_commit)
+
+    def test_contribution_from_a_feature_branch_still_uses_the_protected_base(self):
+        """Starting on an unrelated feature branch does not change the base."""
+        run_git(self.fixture.library, "switch", "-c", "wip-unrelated")
+        self.fixture.add_part()
+
+        result, _linter, pushes, gh = self.contribute()
+
+        self.assertEqual(result.status, rov_core.STATUS_PASS, result.message)
+        self.assertEqual(self.fixture.parent_of_head(), self.fixture.rev("master"))
+        self.assertEqual(self.fixture.rev("master"), self.fixture.baseline_commit)
+        self.assertIn("wip-unrelated", self.fixture.local_branches())
+
+    def test_missing_protected_base_branch_is_blocked(self):
+        """Without the protected base locally, no contribution branch is created."""
+        self.fixture.rename_branch("master", "release-candidate")
+        self.fixture.add_part()
+
+        result, _linter, pushes, gh = self.contribute()
+
+        self.assertEqual(result.status, rov_core.STATUS_BLOCKED, result.message)
+        self.assertIn(rov_core.LIBRARY_BRANCH, result.message)
+        self.assertEqual(self.fixture.local_branches(), ["release-candidate"])
+        self.assertFalse(pushes)
+        self.assertFalse(gh)
 
 
 class TestContributionContract(unittest.TestCase):

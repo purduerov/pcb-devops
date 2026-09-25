@@ -1104,9 +1104,12 @@ def prepare_library_contribution(
     3. ``git status --porcelain`` decides what is contributed, and a change
        outside ``LIBRARY_CONTRIBUTION_PATHS`` is BLOCKED instead of being
        committed, so a contribution can never sweep up unrelated work,
-    4. the new ``add-part-<slug>-<timestamp>`` branch is created from the current
-       branch and stays checked out; a protected branch is never committed to,
-       never pushed, and never re-checked out afterwards,
+    4. the new ``add-part-<slug>-<timestamp>`` branch is always created from the
+       protected ``LIBRARY_BRANCH`` base, never from whatever branch happens to be
+       checked out, so two contributions can never stack on one another, and a
+       missing base is BLOCKED rather than substituted; the new branch stays
+       checked out, and a protected branch is never committed to, never pushed, and
+       never re-checked out afterwards,
     5. only the four allowed directories are staged, and the staged set is
        re-read and re-checked before the commit, and
     6. the branch is pushed and the pull request opened only when the caller
@@ -1174,13 +1177,14 @@ def prepare_library_contribution(
             "changes yourself, then run this command again.",
         )
 
-    base = current_branch(library)
-    if not base:
+    base = LIBRARY_BRANCH
+    if _local_branch_commit(library, base) is None:
         return CheckResult(
             name,
             STATUS_BLOCKED,
-            "HEAD is detached, so no contribution branch could be created from it. "
-            f"Check out {LIBRARY_BRANCH} and run this command again.",
+            f"the protected {base} branch is not available locally, so no contribution "
+            f"branch was created. Fetch it first, for example 'git fetch origin {base}', "
+            "then run this command again.",
         )
     branch = f"{CONTRIBUTION_BRANCH_PREFIX}{_contribution_slug(component)}-{int(time.time()) % 100000}"
     if branch in PROTECTED_BRANCHES:  # pragma: no cover - the prefix makes this unreachable
