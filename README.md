@@ -259,8 +259,9 @@ Maintenance and comparison:
 
 - `run-kicad-ci.yml`: reusable board workflow. Its steps run in this order:
   check out the board, set up Python, **resolve `platform_ref` from the board's
-  `rov.project.json`**, check out the platform tools outside the board tree at
-  that ref, install dependencies, verify no merge conflict markers, verify the
+  `rov.project.json`**, check out the platform tools at that ref and hide that
+  checkout from Git, install dependencies, verify no merge conflict markers,
+  verify the
   central library submodule, **run the shared `rov board validate`**, configure
   the KiBot preflight rules, resolve the design file names, run KiBot ERC/DRC and
   the manufacturing exports, run the sourcing check, generate the portal page and

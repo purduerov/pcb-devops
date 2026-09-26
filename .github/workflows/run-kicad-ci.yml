@@ -76,11 +76,19 @@ jobs:
         with:
           repository: purduerov/pcb-devops
           ref: ${{ steps.platform_ref.outputs.ref }}
-          # Outside the board working tree on purpose. A checkout inside it is an
-          # untracked change in the board repository, which the library update
-          # workflow then refuses to touch, and which KiBot would otherwise see
-          # as part of the board it is exporting.
-          path: ${{ runner.temp }}/pcb-devops
+          # actions/checkout only accepts a path under the workspace, so the
+          # tools cannot be cloned outside the board tree. The next step hides
+          # the directory from Git, so the checkout is not an untracked change
+          # in the board being validated and exported.
+          path: pcb-devops-tools
+
+      - name: Keep the Tools Checkout Out of the Board Repository's Status
+        run: |
+          # `.git/info/exclude` is local to the runner, so this hides the tools
+          # directory without adding a CI-only entry to the board's committed
+          # .gitignore. Without it the board looks dirty, which the library
+          # update workflow then refuses to touch.
+          echo "/pcb-devops-tools/" >> .git/info/exclude
 
       - name: Install Python Dependencies
         run: |
@@ -112,11 +120,11 @@ jobs:
         # checks. It runs the central linter over the library's Symbols directory
         # itself, so a separate find-and-exec step over the same files would lint
         # them twice and report the same failure twice.
-        run: python3 "${{ runner.temp }}/pcb-devops/scripts/rov.py" board validate --project-dir .
+        run: python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .
 
       - name: Configure KiBot Preflight Rules
         run: |
-          cp "${{ runner.temp }}/pcb-devops/kibot_master.yaml" local_kibot.yaml
+          cp pcb-devops-tools/kibot_master.yaml local_kibot.yaml
           if [ "${{ inputs.strict_drc }}" = "false" ]; then
             echo "Non-strict DRC requested. Relaxing preflight checks for WIP branch..."
             sed -i 's/run_drc: true/run_drc: false/g' local_kibot.yaml
@@ -171,7 +179,7 @@ jobs:
           # Find the generated XML BOM and query distributor APIs
           XML_BOM=$(find Generated_Outputs -name "*.xml" | head -n 1)
           if [ -n "$XML_BOM" ] && { [ -n "$MOUSER_API_KEY" ] || [ -n "$DIGIKEY_CLIENT_ID" ]; }; then
-            python3 "${{ runner.temp }}/pcb-devops/scripts/fetch_sourcing_bom.py" "$XML_BOM"
+            python3 pcb-devops-tools/scripts/fetch_sourcing_bom.py "$XML_BOM"
           else
             echo "Skipping sourcing check: XML BOM or sourcing API credentials not present."
           fi
@@ -180,7 +188,7 @@ jobs:
         if: steps.kicad_files.outputs.has_files == 'true'
         run: |
           sudo chown -R $USER:$USER Generated_Outputs
-          python3 "${{ runner.temp }}/pcb-devops/scripts/generate_portal_page.py" Generated_Outputs "${{ github.repository }}" "${{ github.sha }}" "${{ github.ref_name }}"
+          python3 pcb-devops-tools/scripts/generate_portal_page.py Generated_Outputs "${{ github.repository }}" "${{ github.sha }}" "${{ github.ref_name }}"
           
           echo "## 🌊 Purdue ROV Hardware Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "| Artifact | Description | Format |" >> $GITHUB_STEP_SUMMARY

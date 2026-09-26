@@ -229,24 +229,36 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
         self.assertRegex(self.text, r"fetch-depth:\s*0")
 
     def test_update_workflow_checks_out_the_platform_tools_at_the_requested_ref(self):
-        self.assertIn("${{ runner.temp }}/pcb-devops", self.text)
+        self.assertIn("path: pcb-devops-tools", self.text)
         self.assertIn("ref: ${{ inputs.platform-ref }}", self.text)
         self.assertIn("purduerov/pcb-devops", self.text)
 
-    def test_the_platform_tools_never_land_inside_the_board_tree(self):
-        """The tools checkout must not dirty the board it is updating.
+    def test_the_platform_tools_never_make_the_board_dirty(self):
+        """The tools checkout must not look like an uncommitted board change.
 
-        A checkout under the workspace is an untracked change in the board
-        repository. The CLI refuses to update a board with uncommitted changes,
-        so an in-tree checkout made the update workflow block its own update on
-        every run, with "uncommitted changes" as the only clue.
+        actions/checkout only accepts a path under the workspace, so the tools
+        are cloned inside the board. Left untracked, that directory is a change
+        in the board repository, and the CLI refuses to update a board with
+        uncommitted changes, so the update workflow blocked its own update with
+        "uncommitted changes" as the only clue. Each workflow therefore adds the
+        directory to `.git/info/exclude`, which is local to the runner and so
+        never becomes a CI-only entry in a board's committed .gitignore.
         """
         for workflow in (UPDATE_WORKFLOW, RUN_KICAD_CI_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 text = workflow.read_text(encoding="utf-8")
-                self.assertIn("path: ${{ runner.temp }}/pcb-devops", text)
-                self.assertNotIn("path: pcb-devops-tools", text)
-                self.assertNotIn("pcb-devops-tools/scripts/rov.py", text)
+                self.assertIn("path: pcb-devops-tools", text)
+                self.assertIn('echo "/pcb-devops-tools/" >> .git/info/exclude', text)
+                # The exclusion has to land before anything reads the board's
+                # status or the CLI is asked to update it.
+                exclude = text.index(".git/info/exclude")
+                first_use = min(
+                    text.index(needle)
+                    for needle in ("board sync-library", "board validate")
+                    if needle in text
+                )
+                self.assertLess(exclude, first_use)
+                self.assertNotIn("runner.temp", text)
 
     def test_update_workflow_configures_a_bot_identity(self):
         self.assertIn("user.name", self.text)
@@ -415,22 +427,24 @@ class TestRunKicadCiWorkflow(unittest.TestCase):
         self.text = read(RUN_KICAD_CI_WORKFLOW)
 
     def test_run_kicad_ci_calls_shared_validation(self):
-        self.assertIn("pcb-devops/scripts/rov.py", self.text)
-        self.assertIn("board validate", self.text)
+        self.assertIn(
+            "run: python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .",
+            self.text,
+        )
 
     def test_shared_validation_runs_after_checkout_and_before_kibot(self):
         # Fast validation only reads checked-out files, so it must come after the
         # platform tools are present, and a manifest failure must be reported
         # before any manufacturing export work starts.
         validation = self.text.index("Run Shared ROV Board Validation")
-        checkout = self.text.index("path: ${{ runner.temp }}/pcb-devops")
+        checkout = self.text.index("path: pcb-devops-tools")
         kibot = self.text.index("Configure KiBot Preflight Rules")
         self.assertLess(checkout, validation)
         self.assertLess(validation, kibot)
 
     def test_shared_validation_validates_the_calling_board(self):
         self.assertIn(
-            'run: python3 "${{ runner.temp }}/pcb-devops/scripts/rov.py" board validate --project-dir .',
+            'run: python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .',
             self.text,
         )
 
@@ -468,7 +482,7 @@ class TestRunKicadCiWorkflow(unittest.TestCase):
         # no longer fall back to the platform default branch.
         self.assertLess(
             self.text.index("Resolve Platform Ref"),
-            self.text.index("path: ${{ runner.temp }}/pcb-devops"),
+            self.text.index("path: pcb-devops-tools"),
         )
 
     def test_platform_ref_resolution_fails_closed_with_an_actionable_message(self):
@@ -521,7 +535,7 @@ class TestRunKicadCiWorkflow(unittest.TestCase):
         blocks = run_blocks(RUN_KICAD_CI_WORKFLOW)
         self.assertNotIn("Run Central Symbol Library Linter", blocks)
         self.assertIn(
-            'python3 "${{ runner.temp }}/pcb-devops/scripts/rov.py" board validate --project-dir .',
+            'python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .',
             self.text,
         )
         # The owner must still be present: the submodule check stays, and the
@@ -752,7 +766,7 @@ class TestReadmeMatchesTheAutomation(unittest.TestCase):
             "check out the board",
             "set up Python",
             "resolve `platform_ref` from the board",
-            "check out the platform tools outside the board tree at",
+            "check out the platform tools at that ref and hide that\n  checkout from Git, install dependencies, verify no merge conflict markers,\n  verify the",
             "install dependencies",
             "verify no merge conflict markers",
             "verify the\n  central library submodule",

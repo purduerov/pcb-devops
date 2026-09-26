@@ -68,11 +68,21 @@ jobs:
         with:
           repository: purduerov/pcb-devops
           ref: ${{ inputs.platform-ref }}
-          # Outside the board working tree on purpose. Checked out inside it, the
-          # tools are an untracked change in the board repository, and the CLI
-          # refuses to update a board that has uncommitted changes, so the
-          # workflow would block its own update on every run.
-          path: ${{ runner.temp }}/pcb-devops
+          # actions/checkout only accepts a path under the workspace, so the
+          # tools cannot be cloned outside the board tree. The next step hides
+          # the directory from Git instead, which is what keeps the board
+          # clean enough for the CLI to update it.
+          path: pcb-devops-tools
+
+      - name: Keep the Tools Checkout Out of the Board Repository's Status
+        run: |
+          # A tools checkout inside the board is an untracked change, and the
+          # CLI refuses to update a board that has uncommitted changes, so the
+          # workflow would block its own update. `.git/info/exclude` is local to
+          # the runner, so this hides the directory without adding a CI-only
+          # entry to the board's committed .gitignore.
+          echo "/pcb-devops-tools/" >> .git/info/exclude
+          git status --porcelain
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -144,7 +154,7 @@ jobs:
           # update branch, pushes only that branch, and then runs
           # `gh pr create` for it. A FAIL or BLOCKED state stops this step.
           UPDATE_STATUS=0
-          PR_OUTPUT=$(python "${{ runner.temp }}/pcb-devops/scripts/rov.py" board sync-library \
+          PR_OUTPUT=$(python pcb-devops-tools/scripts/rov.py board sync-library \
             --project-dir . \
             --library-path "${{ inputs.library-path }}" \
             --library-branch "${{ inputs.library-branch }}" \
