@@ -1,0 +1,131 @@
+name: Update Board Library
+
+# Reusable library update for board repositories. The board's rov.project.json
+# is the source of truth for the library path and the update branch defaults
+# below are only fallbacks. The shared CLI owns the whole operation: this
+# workflow never commits to, or pushes, the base branch, and it never force
+# pushes. The update is published as a reviewable pull request, and auto-merge
+# stays off unless the caller explicitly opts in.
+on:
+  workflow_call:
+    inputs:
+      library-path:
+        description: Library submodule path recorded in rov.project.json.
+        required: false
+        type: string
+        default: libs/purdue-rov-kicad-lib
+      library-branch:
+        description: Approved library branch that the board tracks.
+        required: false
+        type: string
+        default: master
+      update-branch:
+        description: Reviewable branch the update is published on. Never the base branch.
+        required: false
+        type: string
+        default: chore/library-update
+      auto-merge:
+        description: Enable auto-merge for the library update pull request. Opt-in only.
+        required: false
+        type: boolean
+        default: false
+      platform-ref:
+        description: Branch of purduerov/pcb-devops that provides the shared CLI.
+        required: false
+        type: string
+        default: master
+
+jobs:
+  update-library:
+    name: Prepare library update pull request
+    runs-on: ubuntu-latest
+    # Least privilege: the job may only publish the update branch and open the
+    # pull request. It cannot administer the repository.
+    permissions:
+      contents: write
+      pull-requests: write
+    # One update per repository and ref at a time. A queued run is never
+    # cancelled, so two updates cannot interleave on the same branch.
+    concurrency:
+      group: library-update-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout Board
+        uses: actions/checkout@v4
+        with:
+          # The full history and the initialized library submodule are required
+          # to plan and apply the update safely.
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Checkout Platform Tools
+        uses: actions/checkout@v4
+        with:
+          repository: purduerov/pcb-devops
+          ref: ${{ inputs.platform-ref }}
+          path: pcb-devops-tools
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Configure Bot Identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare Library Update Pull Request
+        id: update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The shared CLI plans the update, commits the submodule pointer on the
+          # update branch, pushes only that branch, and then runs
+          # `gh pr create` for it. A FAIL or BLOCKED state stops this step.
+          UPDATE_STATUS=0
+          PR_OUTPUT=$(python pcb-devops-tools/scripts/rov.py board sync-library \
+            --project-dir . \
+            --library-path "${{ inputs.library-path }}" \
+            --library-branch "${{ inputs.library-branch }}" \
+            --branch "${{ inputs.update-branch }}" \
+            --commit-message "chore(library): update Purdue ROV component library" \
+            --apply --push --pr 2>&1) || UPDATE_STATUS=$?
+          printf '%s\n' "$PR_OUTPUT"
+
+          if [ "$UPDATE_STATUS" -ne 0 ]; then
+            echo "::error::The library update did not complete. See the report above."
+            exit "$UPDATE_STATUS"
+          fi
+
+          # The pull request URL is read from the CLI's own output and is never
+          # assembled here. A `PR_URL=` line is the machine-readable marker; the
+          # CLI's own success summary carries the same URL in prose. Only an
+          # applied-and-published run reports one, so a board that is already
+          # current never reports a stale pull request here.
+          PR_URL=$(printf '%s\n' "$PR_OUTPUT" \
+            | sed -n -e 's|^PR_URL=\(https://[^ ]*/pull/[0-9][0-9]*\)$|\1|p' \
+                      -e 's|.*pull request \(https://[^ ]*/pull/[0-9][0-9]*\).*|\1|p' \
+            | tail -n 1)
+          if [ -z "$PR_URL" ]; then
+            if printf '%s\n' "$PR_OUTPUT" | grep -q '^NO_CHANGE$'; then
+              echo "The CLI reported NO_CHANGE: the board already uses the approved library revision."
+            else
+              echo "No pull request was opened: the board already uses the approved library revision."
+            fi
+            echo "state=up-to-date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Prepared $PR_URL"
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "state=updated" >> "$GITHUB_OUTPUT"
+
+      - name: Enable Auto Merge
+        if: ${{ inputs.auto-merge && steps.update.outputs.url != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh pr merge --auto --merge "${{ steps.update.outputs.url }}"

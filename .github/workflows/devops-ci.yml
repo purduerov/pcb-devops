@@ -8,7 +8,13 @@ on:
 
 jobs:
   validate-tools:
-    runs-on: ubuntu-latest
+    # The shared CLI is the entry point on Windows, Linux, and macOS, so the
+    # same fast checks run everywhere a member is expected to work.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -16,7 +22,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
@@ -25,12 +31,16 @@ jobs:
 
       - name: Compile Python Scripts
         run: |
-          python3 -m py_compile scripts/fetch_sourcing_bom.py scripts/linter_validator.py scripts/generate_portal_page.py scripts/sync_project_libs.py
+          python -m py_compile scripts/rov.py scripts/rov_core.py scripts/fetch_sourcing_bom.py scripts/linter_validator.py scripts/generate_portal_page.py scripts/sync_project_libs.py
 
       - name: Validate YAML Syntax
         run: |
-          python3 -c "import yaml; yaml.safe_load(open('kibot_master.yaml'))"
+          python -c "import yaml; yaml.safe_load(open('kibot_master.yaml'))"
+
+      - name: Validate Workflow Syntax
+        run: |
+          python -c "import pathlib, yaml; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('.github/workflows').glob('*.yml')]"
 
       - name: Run Unit Tests
         run: |
-          python3 -m unittest discover -s tests -v
+          python -m unittest discover -s tests -v
