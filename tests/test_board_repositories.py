@@ -54,6 +54,16 @@ WRAPPER_RELATIVE_PATH = Path(".github") / "workflows" / "auto-update-submodule.y
 CALLED_WORKFLOW = "purduerov/pcb-devops/.github/workflows/update-library.yml@master"
 
 
+def combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    """Return both captured streams as one string, for assertion messages.
+
+    A bare ``result.stdout + result.stderr`` raises ``TypeError`` when the
+    platform hands back ``None`` for a stream instead of text. Treating an
+    absent stream as empty keeps a failure naming the behavior under test.
+    """
+    return (result.stdout or "") + (result.stderr or "")
+
+
 def board_roots() -> list[Path]:
     """Return every board repository that is present next to this repository."""
     roots: list[Path] = []
@@ -270,7 +280,7 @@ class TestBoardTemplateBootstrapScript(BoardRepositoryTestCase):
 
     def test_a_missing_cli_exits_two_with_an_actionable_message(self):
         result = self.run_without_a_cli()
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 2, combined_output(result))
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("[BLOCKED] bootstrap:", result.stderr)
         self.assertIn("ROV_DEVOPS_DIR", result.stderr)
@@ -302,7 +312,7 @@ class TestBoardTemplateBootstrapScript(BoardRepositoryTestCase):
             timeout=120,
             env=environment,
         )
-        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 7, combined_output(result))
         self.assertIn("DELEGATED board bootstrap", result.stdout)
         self.assertIn("--non-interactive", result.stdout)
 

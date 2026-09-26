@@ -111,6 +111,18 @@ def run_script(
     return subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=60)
 
 
+def combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    """Return both captured streams as one string, for assertion messages.
+
+    A bare ``result.stdout + result.stderr`` raises ``TypeError`` when the
+    platform hands back ``None`` for a stream instead of text. The Windows
+    runner did exactly that for the launcher's no-project-file path, which hid
+    the real assertion behind a type error. An absent stream is reported as
+    empty so a failure names the behavior under test instead of ``NoneType``.
+    """
+    return (result.stdout or "") + (result.stderr or "")
+
+
 def write_executable(path: Path, text: str) -> None:
     """Write a script and mark it executable, ignoring Windows chmod limits."""
     path.write_text(text, encoding="utf-8", newline="\n")
@@ -1172,7 +1184,7 @@ class TestLaunchKicadControlFlow(unittest.TestCase):
                         cwd=str(board), capture_output=True, text=True, env=env, timeout=120,
                     )
 
-                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, code, combined_output(result))
                     self.assertIn(f"STUB_BOOTSTRAP_RC={code}", result.stdout)
                     self.assertIn("[3/3] Launching KiCad project", result.stdout)
                     self.assertIn("Opening: Demo.kicad_pro", result.stdout)
@@ -1197,7 +1209,7 @@ class TestLaunchKicadControlFlow(unittest.TestCase):
                 cwd=str(board), capture_output=True, text=True, env=env, timeout=120,
             )
 
-            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 2, combined_output(result))
             self.assertIn("Python is required to prepare this board", result.stdout)
             self.assertIn("Opening: Demo.kicad_pro", result.stdout)
 
@@ -1368,7 +1380,7 @@ class TestShellLauncherControlFlow(unittest.TestCase):
                         wrapper=wrapper,
                     )
                     self.assert_kicad_never_started(board)
-                    output = result.stdout + result.stderr
+                    output = combined_output(result)
                     self.assertEqual(result.returncode, code, output)
                     self.assertIn(f"STUB_BOOTSTRAP_RC={code}", output)
                     self.assertIn("Launching KiCad", output)
@@ -1385,7 +1397,7 @@ class TestShellLauncherControlFlow(unittest.TestCase):
             wrapper = self.build_wrapper(shell, board, restricted=True)
             result = run_script(shell, board / "LAUNCH_KICAD.sh", cwd=board, wrapper=wrapper)
             self.assert_kicad_never_started(board)
-            output = result.stdout + result.stderr
+            output = combined_output(result)
         self.assertEqual(result.returncode, 2, output)
         self.assertIn("Python is required to prepare this board", output)
         self.assertIn("Opening: Demo.kicad_pro", output)
@@ -1404,7 +1416,7 @@ class TestShellLauncherControlFlow(unittest.TestCase):
                     result = run_script(
                         shell, board / "LAUNCH_KICAD.sh", cwd=board, wrapper=wrapper
                     )
-                    output = result.stdout + result.stderr
+                    output = combined_output(result)
                 self.assertEqual(result.returncode, expected, output)
                 self.assertIn("No .kicad_pro project file found", output)
 

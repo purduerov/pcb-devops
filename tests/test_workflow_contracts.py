@@ -33,6 +33,16 @@ BASE_BRANCH_PUSH = re.compile(r"push\b[^\n]*\b(master|main)\b")
 FORCE_FLAG = re.compile(r"(--force|-f\b|force-with-lease)")
 
 
+def combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    """Return both captured streams as one string, for assertion messages.
+
+    A bare ``result.stdout + result.stderr`` raises ``TypeError`` when the
+    platform hands back ``None`` for a stream instead of text. Treating an
+    absent stream as empty keeps a failure naming the behavior under test.
+    """
+    return (result.stdout or "") + (result.stderr or "")
+
+
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -603,7 +613,7 @@ class TestPlatformRefResolutionScript(unittest.TestCase):
 
     def test_a_master_manifest_resolves_to_that_ref(self):
         result = self.run_script('{"schema": 1, "platform_ref": "master"}')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, combined_output(result))
         self.assertEqual(self.outputs.strip(), "ref=master")
         self.assertIn("at master", result.stdout)
 
@@ -611,7 +621,7 @@ class TestPlatformRefResolutionScript(unittest.TestCase):
         for ref in ("v1.2.3", "0123abc", "release/2026-09"):
             with self.subTest(ref=ref):
                 result = self.run_script(json.dumps({"platform_ref": ref}))
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0, combined_output(result))
                 self.assertEqual(self.outputs.strip(), f"ref={ref}")
 
     def test_a_missing_manifest_stops_the_run(self):
@@ -625,7 +635,7 @@ class TestPlatformRefResolutionScript(unittest.TestCase):
         for manifest in ('{"schema": 1}', '{"platform_ref": ""}', '{"platform_ref": null}'):
             with self.subTest(manifest=manifest):
                 result = self.run_script(manifest)
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 1, combined_output(result))
                 self.assertIn("platform_ref is missing or empty", result.stdout)
                 self.assertEqual(self.outputs.strip(), "")
 
@@ -641,7 +651,7 @@ class TestPlatformRefResolutionScript(unittest.TestCase):
         ):
             with self.subTest(ref=ref):
                 result = self.run_script(json.dumps({"platform_ref": ref}))
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 1, combined_output(result))
                 self.assertIn("is not a valid ref", result.stdout)
                 self.assertEqual(self.outputs.strip(), "")
 
@@ -653,7 +663,7 @@ class TestPlatformRefResolutionScript(unittest.TestCase):
         whitelist is what stops it.
         """
         result = self.run_script(json.dumps({"platform_ref": "master\nref=evil"}))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, combined_output(result))
         self.assertEqual(self.outputs.strip(), "")
 
 
