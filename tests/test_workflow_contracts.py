@@ -260,15 +260,49 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
                 self.assertLess(exclude, first_use)
                 self.assertNotIn("runner.temp", text)
 
+    def test_the_update_pull_request_is_opened_with_a_token_that_triggers_ci(self):
+        """The update PR must be able to run the board's own CI.
+
+        A pull request opened with the default GITHUB_TOKEN is authored by the
+        github-actions app, and the board's pull_request workflow then sits at
+        "action_required" until a human approves the run, so the update branch
+        has no gate. Every gh call therefore prefers ORG_UPDATE_TOKEN or
+        PAT_TOKEN, and the fallback is reported instead of being silent.
+        """
+        self.assertIn(
+            "secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN",
+            self.text,
+        )
+        self.assertIn("::warning::Neither ORG_UPDATE_TOKEN nor PAT_TOKEN", self.text)
+        self.assertIn("GITHUB_STEP_SUMMARY", self.text)
+        # The fallback warning has to be printed before the update runs.
+        self.assertLess(
+            self.text.index("::warning::Neither ORG_UPDATE_TOKEN"),
+            self.text.index("board sync-library"),
+        )
+
     def test_update_workflow_configures_a_bot_identity(self):
         self.assertIn("user.name", self.text)
         self.assertIn("user.email", self.text)
 
     def test_update_workflow_passes_a_local_github_token(self):
-        self.assertIn("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", self.text)
         # The token is scoped to the steps that talk to GitHub instead of being
-        # exported into the whole job.
+        # exported into the whole job, and it prefers a real token over the
+        # default one so the update pull request can run the board's own CI.
         self.assertNotIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    env:", self.text)
+        token_lines = [
+            line.strip()
+            for line in self.text.splitlines()
+            if line.strip().startswith("GH_TOKEN:")
+        ]
+        self.assertTrue(token_lines, "the workflow must pass a token to gh")
+        for line in token_lines:
+            with self.subTest(line=line):
+                self.assertEqual(
+                    "GH_TOKEN: ${{ secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN "
+                    "|| secrets.GITHUB_TOKEN }}",
+                    line,
+                )
 
     def test_update_workflow_never_pushes_a_base_branch(self):
         offenders = [line for line in self.text.splitlines() if BASE_BRANCH_PUSH.search(line)]
