@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = ROOT / ".github/workflows"
 UPDATE_WORKFLOW = WORKFLOW_DIR / "update-library.yml"
 DEVOPS_WORKFLOW = WORKFLOW_DIR / "devops-ci.yml"
+RUN_KICAD_CI_WORKFLOW = WORKFLOW_DIR / "run-kicad-ci.yml"
 
 # A push to a protected base branch, with or without a refspec. The check is
 # line based so an unrelated word in a comment cannot hide a real command.
@@ -264,6 +265,53 @@ class TestDevOpsWorkflowContracts(unittest.TestCase):
     def test_validation_requests_read_only_permissions(self):
         permissions = key_values(nested_block(self.text, "permissions:"))
         self.assertEqual({"contents": "read"}, permissions)
+
+
+class TestRunKicadCiWorkflow(unittest.TestCase):
+    """The central board CI must run the same fast validation a member runs.
+
+    The shared ``rov board validate`` call is what makes a local check and a CI
+    check the same check, so its presence, its position, and the surrounding
+    sourcing/artifact behavior are all asserted instead of assumed.
+    """
+
+    def setUp(self):
+        self.text = read(RUN_KICAD_CI_WORKFLOW)
+
+    def test_run_kicad_ci_calls_shared_validation(self):
+        self.assertIn("pcb-devops-tools/scripts/rov.py board validate", self.text)
+
+    def test_shared_validation_runs_after_checkout_and_before_kibot(self):
+        # Fast validation only reads checked-out files, so it must come after the
+        # platform tools are present, and a manifest failure must be reported
+        # before any manufacturing export work starts.
+        validation = self.text.index("Run Shared ROV Board Validation")
+        checkout = self.text.index("path: pcb-devops-tools")
+        kibot = self.text.index("Configure KiBot Preflight Rules")
+        self.assertLess(checkout, validation)
+        self.assertLess(validation, kibot)
+
+    def test_shared_validation_validates_the_calling_board(self):
+        self.assertIn(
+            "run: python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .",
+            self.text,
+        )
+
+    def test_sourcing_secrets_are_still_scoped_to_the_sourcing_step(self):
+        for secret in (
+            "MOUSER_API_KEY: ${{ secrets.MOUSER_API_KEY }}",
+            "DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}",
+            "DIGIKEY_CLIENT_SECRET: ${{ secrets.DIGIKEY_CLIENT_SECRET }}",
+            "DIGIKEY_REFRESH_TOKEN: ${{ secrets.DIGIKEY_REFRESH_TOKEN }}",
+        ):
+            with self.subTest(secret=secret):
+                self.assertIn(secret, self.text)
+        self.assertEqual(1, self.text.count("fetch_sourcing_bom.py"))
+
+    def test_generated_artifact_upload_is_unchanged(self):
+        self.assertIn("uses: actions/upload-artifact@v4", self.text)
+        self.assertIn("name: design-outputs", self.text)
+        self.assertIn("path: Generated_Outputs/", self.text)
 
 
 class TestWorkflowFilesAreValidYaml(unittest.TestCase):

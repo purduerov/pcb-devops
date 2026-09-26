@@ -78,6 +78,8 @@ jobs:
             echo "No central symbol library submodule found to lint."
           fi
 
+      - name: Run Shared ROV Board Validation
+        run: python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .
 
       - name: Configure KiBot Preflight Rules
         run: |
