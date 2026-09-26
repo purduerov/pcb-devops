@@ -188,7 +188,7 @@ def recorded_github():
     def available() -> bool:
         return True
 
-    def run(args, cwd=None, timeout=None):
+    def run(args, cwd=None, timeout=None, env=None):
         calls.append(list(args))
         if args[:2] == ["pr", "create"]:
             return completed(0, f"{PR_URL}\n")

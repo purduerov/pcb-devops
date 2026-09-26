@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -141,6 +142,25 @@ def hook_exit_code_for(results: list[CheckResult]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _child_environment() -> dict[str, str]:
+    """Return the environment for a captured child process.
+
+    A child that prints a non-ASCII character dies on a Windows console whose
+    code page cannot represent it, which is how the symbol linter failed for one
+    member: it printed a check mark, the console was cp1252, and the process
+    exited non-zero before the CLI ever read its output. The CLI then reported
+    that crash as a lint failure and blocked the commit.
+
+    The captured bytes are decoded as UTF-8 below, so the child is told to encode
+    them as UTF-8 too. This is the same pair the library CI already sets for its
+    own code-page tests, and it is ignored by non-Python children such as git.
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def _run_tool(
     command: list, cwd: Path | None = None, timeout: int = SCRIPT_TIMEOUT_SECONDS
 ) -> subprocess.CompletedProcess[str]:
@@ -154,6 +174,7 @@ def _run_tool(
         errors="replace",
         check=False,
         timeout=timeout,
+        env=_child_environment(),
     )
 
 

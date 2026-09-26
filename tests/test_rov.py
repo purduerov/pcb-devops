@@ -8,6 +8,7 @@ tests assert the CLI contract rather than the host's installed tools.
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -134,7 +135,7 @@ def recording_run_tool(returncode=0, stdout=""):
     """Return ``(calls, fake)`` so a test can assert the exact commands."""
     calls: list[list[str]] = []
 
-    def fake(command, cwd=None, timeout=None):
+    def fake(command, cwd=None, timeout=None, env=None):
         calls.append(list(command))
         return completed(returncode, stdout)
 
@@ -209,12 +210,50 @@ def no_kicad_cli():
     only the kicad-cli ERC and DRC invocations are refused.
     """
 
-    def fake(command, cwd=None, timeout=None):
+    def fake(command, cwd=None, timeout=None, env=None):
         if any("kicad-cli" in str(part) for part in command):
             raise AssertionError(f"tests must not start kicad-cli: {command}")
         return completed(0)
 
     return patch.object(rov, "_run_tool", fake)
+
+
+class TestChildProcessEncoding(unittest.TestCase):
+    """A captured child must not die on a Windows console code page.
+
+    One member could not commit at all: the symbol linter printed a check mark,
+    their console was cp1252, the child raised UnicodeEncodeError and exited
+    non-zero, and the CLI reported that crash as a lint failure. Reproducing it
+    here needs no Windows machine, because the child is told what encoding to use
+    and the failure only appears when it is *not* told.
+    """
+
+    def _script_that_prints_a_check_mark(self, directory: Path) -> Path:
+        script = directory / "prints_non_ascii.py"
+        script.write_text(
+            "print('\\u2705 linted')\n", encoding="utf-8", newline="\n"
+        )
+        return script
+
+    def test_a_child_may_print_non_ascii_on_a_legacy_code_page(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            script = self._script_that_prints_a_check_mark(Path(tmp))
+            # A cp1252 parent console is the situation that broke the commit.
+            with patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}, clear=False):
+                os.environ.pop("PYTHONUTF8", None)
+                result = rov._run_tool([sys.executable, str(script)], cwd=Path(tmp))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("\u2705", result.stdout)
+
+    def test_the_child_is_told_to_encode_its_output_as_utf8(self):
+        env = rov._child_environment()
+        self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(env["PYTHONUTF8"], "1")
+
+    def test_the_existing_environment_is_preserved(self):
+        with patch.dict(os.environ, {"SOME_MEMBER_VARIABLE": "kept"}):
+            env = rov._child_environment()
+        self.assertEqual(env["SOME_MEMBER_VARIABLE"], "kept")
 
 
 class TestDoctor(unittest.TestCase):
@@ -247,7 +286,7 @@ class TestDoctor(unittest.TestCase):
         self.assertIn(["/usr/bin/tool", "info"], calls)
 
     def test_doctor_warns_when_docker_daemon_is_unreachable(self):
-        def fake(command, cwd=None, timeout=None):
+        def fake(command, cwd=None, timeout=None, env=None):
             if command[1:] == ["info"]:
                 return completed(1, stderr="cannot connect to the Docker daemon")
             return completed(0)
@@ -417,7 +456,7 @@ class TestBoardValidate(unittest.TestCase):
         )
 
     def test_full_validation_fails_when_erc_reports_violations(self):
-        def fake(command, cwd=None, timeout=None):
+        def fake(command, cwd=None, timeout=None, env=None):
             if "erc" in command:
                 return completed(5, stderr="violations found")
             return completed(0)
