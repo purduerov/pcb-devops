@@ -80,6 +80,55 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Preflight Update Branch and Pull Request
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # The update branch is shared and long-lived: the next scheduled run
+          # reuses it, and the CLI refuses to push when the remote branch already
+          # holds a different commit. That refusal is correct, but on its own it
+          # reads like an unexplained weekly failure. This step only *reports*
+          # the reuse state so a human can see whether a stale branch or an open
+          # pull request is what blocked the run.
+          #
+          # It deliberately changes nothing: nothing is force pushed, no branch
+          # is deleted, and no pull request is closed or reopened, so a
+          # reviewer's work is never discarded and no unrelated review is
+          # ended. Instead the repository has to be configured to
+          # delete head branches automatically after merge, or a human removes
+          # the merged update branch. That requirement is documented in
+          # README.md under "The scheduled update branch".
+          set -uo pipefail
+          BRANCH="${{ inputs.update-branch }}"
+          echo "## Library update preflight" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Update branch: \`$BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Approved library branch: \`${{ inputs.library-branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if REMOTE_COMMIT=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | awk '{print $1}') && [ -n "$REMOTE_COMMIT" ]; then
+            echo "- Remote branch: \`origin/$BRANCH\` already exists at \`$REMOTE_COMMIT\` and will be reused." >> "$GITHUB_STEP_SUMMARY"
+            echo "Reusing existing origin/$BRANCH at $REMOTE_COMMIT."
+          else
+            echo "- Remote branch: \`origin/$BRANCH\` does not exist yet and will be created." >> "$GITHUB_STEP_SUMMARY"
+            echo "origin/$BRANCH does not exist yet; it will be created."
+          fi
+
+          if OPEN_PR=$(gh pr list --head "$BRANCH" --state open --json number,url \
+            --limit 1 2>/dev/null) && [ -n "$OPEN_PR" ] && [ "$OPEN_PR" != "[]" ]; then
+            echo "- Open pull request for this branch:" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            gh pr list --head "$BRANCH" --state open --json number,url,title --limit 5 \
+              --jq '.[] | "  - #\(.number) \(.title) (\(.url))"' >> "$GITHUB_STEP_SUMMARY" || true
+            echo "An open pull request for $BRANCH is still in review; this run reuses it instead of opening a second one."
+          else
+            echo "- Open pull request for this branch: none." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The update branch is bot-owned and reused every run. If \`origin/$BRANCH\` exists but does not hold the commit this run prepared, the CLI stops rather than pushing over it: merge the open pull request, then let the repository delete the head branch (or delete it yourself), and re-run." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Prepare Library Update Pull Request
         id: update
         env:

@@ -7,7 +7,12 @@ token, a force push, or a lost permission would otherwise only be discovered on
 a real board.
 """
 
+import json
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -88,6 +93,38 @@ def key_values(block: str) -> dict[str, str]:
         else:
             values[name] = inline
     return values
+
+
+def posix_dir(shell: str, directory: Path) -> str:
+    """Return ``directory`` in the form the shell itself reports it.
+
+    A Windows path is not the same string a POSIX shell sees, so the shell is
+    asked for its own working directory instead of guessing a translation.
+    """
+    result = subprocess.run(
+        [shell, "-c", "pwd -P"], cwd=str(directory), capture_output=True, text=True, timeout=30
+    )
+    return result.stdout.strip()
+
+
+def run_blocks(workflow: Path) -> dict[str, str]:
+    """Return ``{step name: run script}`` for every step that has one.
+
+    The scripts are read from the parsed YAML rather than from the text, so a
+    step cannot be checked by accident against a commented-out copy. Parsing is
+    skipped, not silently replaced, when PyYAML is missing.
+    """
+    if yaml is None:
+        raise unittest.SkipTest("PyYAML is not installed in this environment")
+    data = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    blocks: dict[str, str] = {}
+    for job in (data.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            script = step.get("run")
+            if script:
+                blocks[step.get("name") or script[:30]] = script
+    return blocks
+
 
 
 class TestUpdateLibraryWorkflow(unittest.TestCase):
@@ -224,6 +261,80 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
         # Auto-merge must not be reachable from more than one step.
         self.assertEqual(1, self.text.count("gh pr merge"))
 
+    def test_scheduled_branch_reuse_is_reported_before_the_update_runs(self):
+        """Important I4: the reuse state is made explicit, and reported only.
+
+        The update branch is shared between runs, so the CLI correctly refuses to
+        push over a remote branch that holds a different commit. Without a
+        report, that refusal reads as an unexplained weekly failure. The
+        preflight publishes the state to the job summary, which is safe because
+        it changes nothing.
+        """
+        blocks = run_blocks(UPDATE_WORKFLOW)
+        self.assertIn("Preflight Update Branch and Pull Request", blocks)
+        preflight = blocks["Preflight Update Branch and Pull Request"]
+        self.assertIn("git ls-remote", preflight)
+        self.assertIn("gh pr list", preflight)
+        self.assertIn("GITHUB_STEP_SUMMARY", preflight)
+        # The preflight must come before the update step so a blocked run still
+        # shows why, and it must never be the step that fails.
+        self.assertLess(
+            self.text.index("Preflight Update Branch and Pull Request"),
+            self.text.index("Prepare Library Update Pull Request"),
+        )
+        self.assertNotIn("exit 1", preflight, "a report must never fail the run")
+        self.assertNotIn("set -e", preflight, "a report must survive a missing gh or remote")
+
+    def test_preflight_documents_the_required_head_branch_cleanup_setting(self):
+        preflight = run_blocks(UPDATE_WORKFLOW)["Preflight Update Branch and Pull Request"]
+        self.assertIn("delete head branches automatically after merge", preflight)
+        self.assertIn("README.md", preflight)
+        self.assertIn("rather than pushing over it", preflight)
+
+    def test_update_workflow_never_destroys_a_branch_or_a_pull_request(self):
+        """Important I4: the safe answer is to report, never to clean up.
+
+        Force pushing the shared update branch could discard a reviewer's work,
+        and closing an unrelated pull request or deleting a branch a member is
+        using is never this workflow's call. Only the reusable workflow's own
+        update branch and its own pull request are ever touched, and only
+        through the CLI.
+        """
+        for forbidden in (
+            "gh pr close",
+            "gh pr merge --squash",
+            "--force",
+            "force-with-lease",
+            "git push origin --delete",
+            "git push --delete",
+            "git branch -D",
+            "git branch -d",
+            "git push origin :",
+            "git clean",
+            "gh pr delete",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.text)
+
+    def test_auto_merge_is_the_only_gh_verb_that_changes_a_pull_request(self):
+        # A closed or reopened pull request would be a second, unreviewed way
+        # for the update workflow to end a review.
+        offenders = [
+            line.strip()
+            for line in self.text.splitlines()
+            if re.search(r"\bgh\s+pr\s+(close|reopen|delete|edit|ready|lock)\b", line)
+        ]
+        self.assertEqual([], offenders)
+
+    def test_update_workflow_pins_the_platform_tools_before_use(self):
+        blocks = run_blocks(UPDATE_WORKFLOW)
+        self.assertLess(
+            self.text.index("Checkout Platform Tools"),
+            self.text.index("Prepare Library Update Pull Request"),
+        )
+        self.assertIn("ref: ${{ inputs.platform-ref }}", self.text)
+
+
 
 class TestDevOpsWorkflowContracts(unittest.TestCase):
     """The DevOps validation job must run the same checks on every platform."""
@@ -312,6 +423,364 @@ class TestRunKicadCiWorkflow(unittest.TestCase):
         self.assertIn("uses: actions/upload-artifact@v4", self.text)
         self.assertIn("name: design-outputs", self.text)
         self.assertIn("path: Generated_Outputs/", self.text)
+
+    def test_platform_ref_is_resolved_from_the_board_manifest(self):
+        """Important I2/I7: `platform_ref` selects the validating revision.
+
+        The manifest documented the platform revision but nothing read it, so
+        every board was validated by whatever `purduerov/pcb-devops` default
+        branch happened to be. The checkout must consume the resolved output.
+        """
+        blocks = run_blocks(RUN_KICAD_CI_WORKFLOW)
+        self.assertIn("Resolve Platform Ref", blocks)
+        resolve = blocks["Resolve Platform Ref"]
+        self.assertIn("rov.project.json", resolve)
+        self.assertIn("platform_ref", resolve)
+        self.assertIn('echo "ref=$REF" >> "$GITHUB_OUTPUT"', resolve)
+        self.assertIn("ref: ${{ steps.platform_ref.outputs.ref }}", self.text)
+        # The step must run before the checkout it feeds, and the checkout must
+        # no longer fall back to the platform default branch.
+        self.assertLess(
+            self.text.index("Resolve Platform Ref"),
+            self.text.index("path: pcb-devops-tools"),
+        )
+
+    def test_platform_ref_resolution_fails_closed_with_an_actionable_message(self):
+        resolve = run_blocks(RUN_KICAD_CI_WORKFLOW)["Resolve Platform Ref"]
+        # A missing manifest, an empty ref, a traversal-shaped ref, and a ref with
+        # a disallowed character each stop the run.
+        self.assertEqual(4, resolve.count("exit 1"), resolve)
+        for message in (
+            "is missing, so the platform ref for purduerov/pcb-devops is unknown",
+            "platform_ref is missing or empty",
+            "may not start or end with '/'",
+            "is not a valid ref",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, resolve)
+        # Every stop is announced as a GitHub error annotation, not a bare exit.
+        self.assertEqual(resolve.count("echo \"::error::"), 4, resolve)
+        # A strict mode is required so a broken manifest cannot slip past.
+        self.assertIn("set -euo pipefail", resolve)
+
+    def test_platform_ref_resolution_never_reads_a_null_as_a_ref(self):
+        """A JSON `null` must fail closed, not become the ref "None".
+
+        `dict.get(key, "")` returns the stored `None`, which would print as the
+        literal string `None` and pass the character check, so the workflow
+        would check out purduerov/pcb-devops at a ref named "None".
+        """
+        resolve = run_blocks(RUN_KICAD_CI_WORKFLOW)["Resolve Platform Ref"]
+        self.assertIn(".get('platform_ref') or ''", resolve)
+        self.assertNotIn(".get('platform_ref','')", resolve.replace(" ", ""))
+
+
+    def test_platform_ref_resolution_runs_after_python_is_available(self):
+        # The manifest is read with `python`, so the interpreter has to exist
+        # before the step runs.
+        self.assertLess(
+            self.text.index("Setup Python"), self.text.index("Resolve Platform Ref")
+        )
+
+    def test_library_symbol_lint_has_exactly_one_owner(self):
+        """Important I9: the library lint must not run twice in board CI.
+
+        `rov board validate` already runs the linter over the library's Symbols
+        directory, so the old `find ... -exec linter_validator.py` step linted
+        the same files a second time and could report the same failure twice.
+        The shared validation is the single owner.
+        """
+        self.assertNotIn("linter_validator.py", self.text)
+        self.assertIn("Run Shared ROV Board Validation", self.text)
+        blocks = run_blocks(RUN_KICAD_CI_WORKFLOW)
+        self.assertNotIn("Run Central Symbol Library Linter", blocks)
+        self.assertIn(
+            "python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .",
+            self.text,
+        )
+        # The owner must still be present: the submodule check stays, and the
+        # shared validation is not merely moved.
+        self.assertIn("Verify Central Library Submodule", blocks)
+
+    def test_manifest_policy_matches_the_shared_manifest_validator(self):
+        """The workflow reads the same `platform_ref` key the validator checks.
+
+        `validate_project_config` reports an empty `platform_ref` as a FAIL, and
+        the workflow has to fail closed on the same value, or a manifest could
+        pass CI and block a member locally.
+        """
+        rov_core_source = (ROOT / "scripts" / "rov_core.py").read_text(encoding="utf-8")
+        self.assertIn('_require_text(config, "platform_ref"', rov_core_source)
+
+
+class TestPlatformRefResolutionScript(unittest.TestCase):
+    """Run the workflow's platform-ref resolution script for real.
+
+    Important I2/I7. Reading the manifest is the whole point of `platform_ref`,
+    and a script that quietly accepted an empty, missing, or malformed ref would
+    validate a board against an arbitrary platform revision. The script is
+    extracted from the parsed workflow and executed verbatim against real
+    manifests, so the cases below are the cases CI will actually see.
+
+    Only the interpreter is supplied: a shim named ``python`` on ``PATH`` that
+    execs the interpreter running the tests. Everything that is the contract -
+    the manifest read, the validation, the ``::error::`` text, the exit codes,
+    and the ``GITHUB_OUTPUT`` line - is the workflow's own text.
+    """
+
+    def setUp(self):
+        self.bash = self.find_bash()
+        if self.bash is None:
+            self.skipTest("no bash is available to run the platform-ref script")
+        self.script = run_blocks(RUN_KICAD_CI_WORKFLOW)["Resolve Platform Ref"]
+
+    @staticmethod
+    def find_bash() -> str | None:
+        for candidate in ("bash",):
+            path = shutil.which(candidate)
+            if path is None:
+                continue
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                probe = Path(tmp) / "probe.sh"
+                probe.write_text('printf OK\n', encoding="utf-8", newline="\n")
+                posix_probe = f"{posix_dir(path, Path(tmp))}/probe.sh"
+                result = subprocess.run(
+                    [path, posix_probe], capture_output=True, text=True, timeout=60
+                )
+                if result.returncode == 0 and "OK" in result.stdout:
+                    return path
+        return None
+
+    def run_script(self, manifest: str | None) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            board = Path(tmp) / "board"
+            board.mkdir()
+            if manifest is not None:
+                (board / "rov.project.json").write_text(manifest, encoding="utf-8")
+            script = board / "resolve.sh"
+            script.write_text(self.script, encoding="utf-8", newline="\n")
+            outputs = board / "github-output.txt"
+            outputs.write_text("", encoding="utf-8")
+            self.write_interpreter_shim(board)
+            posix_board = posix_dir(self.bash, board)
+            wrapper = board / "wrapper.sh"
+            wrapper.write_text(
+                "#!/bin/bash\n"
+                f'PATH="{posix_board}/tools:$PATH"\n'
+                "export PATH\n"
+                f'export GITHUB_OUTPUT="{posix_board}/github-output.txt"\n'
+                'exec "$BASH" "$1" "$2"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.chmod(wrapper)
+            result = subprocess.run(
+                [self.bash, f"{posix_board}/wrapper.sh", f"{posix_board}/resolve.sh"],
+                cwd=str(board),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.outputs = outputs.read_text(encoding="utf-8")
+        return result
+
+    def write_interpreter_shim(self, board: Path) -> None:
+        """Create a ``python`` shim that runs the interpreter running the tests."""
+        tools = board / "tools"
+        tools.mkdir()
+        interpreter = Path(sys.executable)
+        posix = f"{posix_dir(self.bash, interpreter.parent)}/{interpreter.name}"
+        shim = tools / "python"
+        shim.write_text(f'#!/bin/sh\nexec "{posix}" "$@"\n', encoding="utf-8", newline="\n")
+        self.chmod(shim)
+
+    @staticmethod
+    def chmod(path: Path) -> None:
+        try:
+            path.chmod(0o755)
+        except OSError:
+            pass
+
+    def test_a_master_manifest_resolves_to_that_ref(self):
+        result = self.run_script('{"schema": 1, "platform_ref": "master"}')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.outputs.strip(), "ref=master")
+        self.assertIn("at master", result.stdout)
+
+    def test_a_tag_or_commit_ref_is_accepted(self):
+        for ref in ("v1.2.3", "0123abc", "release/2026-09"):
+            with self.subTest(ref=ref):
+                result = self.run_script(json.dumps({"platform_ref": ref}))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.outputs.strip(), f"ref={ref}")
+
+    def test_a_missing_manifest_stops_the_run(self):
+        result = self.run_script(None)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("rov.project.json is missing", result.stdout)
+        self.assertEqual(self.outputs.strip(), "")
+
+    def test_an_empty_or_absent_platform_ref_stops_the_run(self):
+        for manifest in ('{"schema": 1}', '{"platform_ref": ""}', '{"platform_ref": null}'):
+            with self.subTest(manifest=manifest):
+                result = self.run_script(manifest)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("platform_ref is missing or empty", result.stdout)
+                self.assertEqual(self.outputs.strip(), "")
+
+    def test_a_malformed_platform_ref_stops_the_run(self):
+        for ref in (
+            "../evil",
+            "master branch",
+            "feature/../master",
+            "/master",
+            "master/",
+            "refs/heads/master;rm -rf /",
+            "master\nrefs/heads/evil",
+        ):
+            with self.subTest(ref=ref):
+                result = self.run_script(json.dumps({"platform_ref": ref}))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("is not a valid ref", result.stdout)
+                self.assertEqual(self.outputs.strip(), "")
+
+    def test_a_ref_with_a_newline_cannot_smuggle_a_second_output(self):
+        """A multi-line value must not add a second `GITHUB_OUTPUT` line.
+
+        The ref is written straight into the step output, so a value carrying a
+        newline could otherwise inject an output of its own. The character
+        whitelist is what stops it.
+        """
+        result = self.run_script(json.dumps({"platform_ref": "master\nref=evil"}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.outputs.strip(), "")
+
+
+
+
+
+class TestWorkflowShellBlocksParse(unittest.TestCase):
+    """Every `run:` block must be valid shell.
+
+    The workflows are the automation surface, and a syntax error in one of them
+    only shows up as a failed CI run on a real board. Parsing the scripts is
+    cheap and catches the mistake before it is pushed.
+    """
+
+    def bash(self) -> str | None:
+        for candidate in ("bash",):
+            path = shutil.which(candidate)
+            if path is None:
+                continue
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                probe = Path(tmp) / "probe.sh"
+                probe.write_text("if true; then :; fi\n", encoding="utf-8", newline="\n")
+                result = subprocess.run(
+                    [path, "-n", f"{posix_dir(path, Path(tmp))}/probe.sh"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if result.returncode == 0:
+                    return path
+        return None
+
+    def test_every_run_block_parses(self):
+        bash = self.bash()
+        if bash is None:
+            self.skipTest("no bash is available to parse the workflow scripts")
+        for workflow in sorted(WORKFLOW_DIR.glob("*.yml")):
+            for name, script in run_blocks(workflow).items():
+                if "${" in script:
+                    continue  # GitHub expressions are not shell; they are asserted as text
+                with self.subTest(workflow=workflow.name, step=name):
+                    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                        path = Path(tmp) / "step.sh"
+                        path.write_text(script, encoding="utf-8", newline="\n")
+                        result = subprocess.run(
+                            [bash, "-n", f"{posix_dir(bash, Path(tmp))}/step.sh"],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                        )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class TestReadmeMatchesTheAutomation(unittest.TestCase):
+    """The README is the documentation, so its claims are asserted too.
+
+    A workflow that changed while the prose still describes the old behavior
+    sends a member looking for a step that no longer exists, and that is exactly
+    what a follow-up item in the README is supposed to prevent.
+    """
+
+    def setUp(self):
+        self.text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    def test_the_documented_step_order_names_every_current_step(self):
+        # The README describes each step by its purpose, in the order the workflow
+        # runs it. Every current step has to appear, and the order has to match, so
+        # a step that is added, removed, or moved cannot be left undocumented.
+        documented = [
+            "check out the board",
+            "set up Python",
+            "resolve `platform_ref` from the board",
+            "check out the platform tools into `pcb-devops-tools` at",
+            "install dependencies",
+            "verify no merge conflict markers",
+            "verify the\n  central library submodule",
+            "run the shared `rov board validate`",
+            "configure\n  the KiBot preflight rules",
+            "resolve\n  the design file names",
+            "run KiBot ERC/DRC and\n  the manufacturing exports",
+            "run the sourcing check",
+            "generate the portal page and\n  job summary",
+            "upload the artifacts",
+            "deploy the interactive BOM to GitHub\n  Pages",
+        ]
+        prose = self.text.split("- `run-kicad-ci.yml`:", 1)[1]
+        prose = prose.split("- `update-library.yml`:", 1)[0]
+        flat = " ".join(prose.split())
+        phrases = [" ".join(phrase.split()) for phrase in documented]
+        for phrase in phrases:
+            with self.subTest(step=phrase):
+                self.assertIn(phrase, flat)
+        positions = [flat.index(phrase) for phrase in phrases]
+        self.assertEqual(sorted(positions), positions, "the documented order is wrong")
+        # Nothing may be documented that the workflow no longer runs.
+        self.assertNotIn("run the central symbol linter", flat)
+
+    def test_the_readme_does_not_still_describe_the_removed_linter_step(self):
+        self.assertNotIn("run the central symbol linter, **run the shared", self.text)
+        self.assertIn("single owner", self.text)
+
+    def test_the_readme_states_the_severity_policy_of_full_validation(self):
+        self.assertIn("--severity-error", self.text)
+        self.assertIn("severity: error", self.text)
+
+    def test_the_readme_documents_the_head_branch_cleanup_setting(self):
+        # The workflow's preflight points a human at this, so the README is where
+        # the requirement has to be written down.
+        self.assertIn("Automatically delete head branches", self.text)
+        self.assertIn("The scheduled update branch", self.text)
+
+    def test_the_readme_documents_the_pre_bootstrap_hook_exposure(self):
+        self.assertIn("pre-bootstrap exposure", self.text)
+        self.assertIn("core.hooksPath", self.text)
+
+    def test_the_readme_shows_the_caller_permissions_the_wrapper_needs(self):
+        self.assertRegex(
+            self.text,
+            r"permissions:\n\s+contents: write\n\s+pull-requests: write\n\s+uses: purduerov/pcb-devops",
+        )
+
+    def test_the_readme_no_longer_queues_the_wrapper_permissions_as_a_follow_up(self):
+        follow_ups = self.text.split("The remaining follow-ups:", 1)[1]
+        self.assertNotIn("Board update wrappers rely on repository default permissions", follow_ups)
+
+    def test_the_readme_documents_that_row_listing_summaries_go_to_stderr(self):
+        self.assertIn("standard error", self.text)
 
 
 class TestWorkflowFilesAreValidYaml(unittest.TestCase):

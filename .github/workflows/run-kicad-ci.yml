@@ -34,16 +34,49 @@ jobs:
           submodules: recursive
           fetch-depth: 0 # Fetch all history for branch comparisons
 
-      - name: Checkout DevOps Tools
-        uses: actions/checkout@v4
-        with:
-          repository: purduerov/pcb-devops
-          path: pcb-devops-tools
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Resolve Platform Ref
+        id: platform_ref
+        # rov.project.json is the single source of truth for which purduerov/pcb-devops
+        # revision validates this board. Reading it here is what makes platform_ref
+        # operational instead of documentation, and failing closed is deliberate: a board
+        # with no usable ref must not be validated by an arbitrary revision. It runs after
+        # Setup Python so the manifest is read with a known interpreter.
+        run: |
+          set -euo pipefail
+          MANIFEST="rov.project.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::$MANIFEST is missing, so the platform ref for purduerov/pcb-devops is unknown. Add the manifest before running this workflow."
+            exit 1
+          fi
+          REF=$(python -c "import json,sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('platform_ref') or '')" "$MANIFEST" | tr -d '\r')
+          if [ -z "$REF" ]; then
+            echo "::error::platform_ref is missing or empty in $MANIFEST, so the platform ref for purduerov/pcb-devops is unknown. Set it to the branch, tag, or commit that should validate this board."
+            exit 1
+          fi
+          case "$REF" in
+            /*|*/|*..*)
+              echo "::error::platform_ref '$REF' in $MANIFEST is not a valid ref. It may not start or end with '/' and may not contain '..'."
+              exit 1
+              ;;
+            *[!A-Za-z0-9._/-]*)
+              echo "::error::platform_ref '$REF' in $MANIFEST is not a valid ref. Use only letters, digits, '.', '_', '-', and '/'."
+              exit 1
+              ;;
+          esac
+          echo "Validating this board with purduerov/pcb-devops at $REF (from $MANIFEST)."
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout DevOps Tools
+        uses: actions/checkout@v4
+        with:
+          repository: purduerov/pcb-devops
+          ref: ${{ steps.platform_ref.outputs.ref }}
+          path: pcb-devops-tools
 
       - name: Install Python Dependencies
         run: |
@@ -69,16 +102,12 @@ jobs:
             echo "✅ Submodule libs/purdue-rov-kicad-lib initialized correctly."
           fi
 
-      - name: Run Central Symbol Library Linter
-        run: |
-          # Locate symbol libraries in the submodule and run the linter
-          if [ -d "libs/purdue-rov-kicad-lib/Symbols" ]; then
-            find libs/purdue-rov-kicad-lib/Symbols -name "*.kicad_sym" -exec python3 pcb-devops-tools/scripts/linter_validator.py {} +
-          else
-            echo "No central symbol library submodule found to lint."
-          fi
-
       - name: Run Shared ROV Board Validation
+        # This step is the single owner of the library symbol lint as well as the
+        # manifest, project-file, library-table, submodule, and conflict-marker
+        # checks. It runs the central linter over the library's Symbols directory
+        # itself, so a separate find-and-exec step over the same files would lint
+        # them twice and report the same failure twice.
         run: python3 pcb-devops-tools/scripts/rov.py board validate --project-dir .
 
       - name: Configure KiBot Preflight Rules
