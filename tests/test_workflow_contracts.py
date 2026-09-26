@@ -260,26 +260,28 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
                 self.assertLess(exclude, first_use)
                 self.assertNotIn("runner.temp", text)
 
-    def test_the_update_pull_request_is_opened_with_a_token_that_triggers_ci(self):
-        """The update PR must be able to run the board's own CI.
+    def test_the_update_pull_request_needs_no_token_secret(self):
+        """The update workflow runs on the built-in token, with no secret to manage.
 
-        A pull request opened with the default GITHUB_TOKEN is authored by the
-        github-actions app, and the board's pull_request workflow then sits at
-        "action_required" until a human approves the run, so the update branch
-        has no gate. Every gh call therefore prefers ORG_UPDATE_TOKEN or
-        PAT_TOKEN, and the fallback is reported instead of being silent.
+        A pull request opened with the built-in GITHUB_TOKEN is authored by the
+        github-actions app, so GitHub holds that pull request's workflow run
+        until a person approves it. Supporting a token to avoid the click was
+        tried and removed: it would have meant creating and rotating a secret in
+        every board repository to save one click on a weekly review, which is a
+        poor trade for a club. The workflow therefore states the approval step
+        in the run summary instead of hiding it.
         """
-        self.assertIn(
-            "secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN",
-            self.text,
-        )
-        self.assertIn("::warning::Neither ORG_UPDATE_TOKEN nor PAT_TOKEN", self.text)
+        self.assertNotIn("ORG_UPDATE_TOKEN", self.text)
+        self.assertNotIn("PAT_TOKEN", self.text)
+        self.assertNotIn("secrets.", self.text.split("jobs:")[0].split("on:")[0])
+        for line in self.text.splitlines():
+            if line.strip().startswith("GH_TOKEN:"):
+                with self.subTest(line=line.strip()):
+                    self.assertEqual("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", line.strip())
+        # The approval step is part of reviewing the pull request, so the run
+        # summary says so rather than leaving a silent yellow banner.
+        self.assertIn("approves the run", self.text)
         self.assertIn("GITHUB_STEP_SUMMARY", self.text)
-        # The fallback warning has to be printed before the update runs.
-        self.assertLess(
-            self.text.index("::warning::Neither ORG_UPDATE_TOKEN"),
-            self.text.index("board sync-library"),
-        )
 
     def test_update_workflow_configures_a_bot_identity(self):
         self.assertIn("user.name", self.text)
@@ -287,8 +289,8 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
 
     def test_update_workflow_passes_a_local_github_token(self):
         # The token is scoped to the steps that talk to GitHub instead of being
-        # exported into the whole job, and it prefers a real token over the
-        # default one so the update pull request can run the board's own CI.
+        # exported into the whole job, and it is the built-in one so no secret
+        # has to be created for a board.
         self.assertNotIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    env:", self.text)
         token_lines = [
             line.strip()
@@ -298,11 +300,7 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
         self.assertTrue(token_lines, "the workflow must pass a token to gh")
         for line in token_lines:
             with self.subTest(line=line):
-                self.assertEqual(
-                    "GH_TOKEN: ${{ secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN "
-                    "|| secrets.GITHUB_TOKEN }}",
-                    line,
-                )
+                self.assertEqual("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", line)
 
     def test_update_workflow_never_pushes_a_base_branch(self):
         offenders = [line for line in self.text.splitlines() if BASE_BRANCH_PUSH.search(line)]

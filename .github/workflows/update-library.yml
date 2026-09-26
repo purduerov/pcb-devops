@@ -97,9 +97,7 @@ jobs:
       - name: Preflight Update Branch and Pull Request
         id: preflight
         env:
-          GH_TOKEN: ${{ secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
-          ORG_UPDATE_TOKEN: ${{ secrets.ORG_UPDATE_TOKEN }}
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           # The update branch is shared and long-lived: the next scheduled run
@@ -119,21 +117,18 @@ jobs:
           set -uo pipefail
           BRANCH="${{ inputs.update-branch }}"
 
-          # A pull request opened with the default GITHUB_TOKEN is authored by
-          # the github-actions app, and the board's own pull_request CI then sits
-          # at "action_required" until a human approves the run. The update
-          # branch is therefore pushed and its pull request opened with
-          # ORG_UPDATE_TOKEN or PAT_TOKEN when one is configured, so the gate
-          # runs on its own. Without either secret the update still opens, but
-          # the person merging it has to approve the workflow run first.
-          if [ -z "$ORG_UPDATE_TOKEN" ] && [ -z "$PAT_TOKEN" ]; then
-            echo "::warning::Neither ORG_UPDATE_TOKEN nor PAT_TOKEN is configured, so this run falls back to GITHUB_TOKEN. The pull request will be authored by github-actions and the board's CI on it will need manual approval before it runs. Add ORG_UPDATE_TOKEN (contents: write, pull-requests: write) to the board repository to make that gate automatic." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          # This workflow uses the repository's built-in GITHUB_TOKEN, so no
+          # secret has to be created or rotated anywhere. The one consequence
+          # is that the pull request it opens is authored by github-actions,
+          # and GitHub holds that pull request's own workflow run until a
+          # person approves it. The reviewer is already opening the pull request
+          # to read the change, so approving the run is part of reviewing it.
 
           echo "## Library update preflight" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Update branch: \`$BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Approved library branch: \`${{ inputs.library-branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Its CI starts when a reviewer approves the run: this workflow uses the built-in \`GITHUB_TOKEN\`, so no token secret is needed." >> "$GITHUB_STEP_SUMMARY"
 
           if REMOTE_COMMIT=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | awk '{print $1}') && [ -n "$REMOTE_COMMIT" ]; then
             echo "- Remote branch: \`origin/$BRANCH\` already exists at \`$REMOTE_COMMIT\` and will be reused." >> "$GITHUB_STEP_SUMMARY"
@@ -160,7 +155,7 @@ jobs:
       - name: Prepare Library Update Pull Request
         id: update
         env:
-          GH_TOKEN: ${{ secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -209,6 +204,6 @@ jobs:
       - name: Enable Auto Merge
         if: ${{ inputs.auto-merge && steps.update.outputs.url != '' }}
         env:
-          GH_TOKEN: ${{ secrets.ORG_UPDATE_TOKEN || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: gh pr merge --auto --merge "${{ steps.update.outputs.url }}"
