@@ -765,11 +765,13 @@ Fast validation must include:
 5. Merge-conflict markers in `*.kicad_*` and `*-lib-table`, matching the existing CI rule.
 6. Central linter against `libs/purdue-rov-kicad-lib/Symbols` when the directory exists.
 
-Full validation additionally requires `kicad-cli`. Run:
+Full validation additionally requires `kicad-cli`. The severity flag is
+`--severity-error`, so `--full` fails a board only where `kibot_master.yaml`
+(`severity: error`) would. Run:
 
 ```text
-kicad-cli sch erc --severity-all --exit-code-violations -o <temp>/erc.rpt <schematic>
-kicad-cli pcb drc --severity-all --exit-code-violations -o <temp>/drc.rpt <board>
+kicad-cli sch erc --severity-error --exit-code-violations -o <temp>/erc.rpt <schematic>
+kicad-cli pcb drc --severity-error --exit-code-violations -o <temp>/drc.rpt <board>
 ```
 
 Return `BLOCKED` if `kicad-cli` or the project files are missing. Do not silently skip full validation. Manufacturing export remains the responsibility of the existing KiBot workflow; `doctor` reports whether Docker is available for it.

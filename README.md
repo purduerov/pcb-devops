@@ -83,11 +83,18 @@ the commit only on a real `FAIL` so missing tools never lock you out of Git.
 
 This fast check is the one `run-kicad-ci.yml` runs, so a local pass means the
 shared CI gate will pass. ERC, DRC, and the manufacturing exports are separate
-KiBot steps, not part of this check.
+KiBot steps, not part of this check. The central symbol lint is the one thing
+that *is* part of this check: the shared validation step is the single owner of
+the library lint in board CI, so the same files are never linted twice.
 
 `--full` is **not** the whole CI path. It adds `kicad-cli` ERC and DRC only. It
 does not run the KiBot manufacturing export, so a local `--full` pass does not
 mean the export step would succeed. See the known gaps at the end of this file.
+
+`--full` uses the same severity policy as CI. `kibot_master.yaml` runs its
+preflight at `severity: error`, so `--full` passes `--severity-error` to
+`kicad-cli`: an ERC or DRC *warning* does not fail a local run any more than it
+fails CI. A local failure means CI would fail too.
 
 ### `rov board sync-library`
 
@@ -107,7 +114,10 @@ checkout.
 
 It requires a clean board worktree and a clean submodule. A dirty worktree, a
 diverged remote, or an existing update branch with different content is
-`BLOCKED`, not something to force through.
+`BLOCKED`, not something to force through. If a `BLOCKED` happens after the
+update branch has been checked out, the message names that branch, the base it
+was created from, and the `git switch` that returns you, so you are never left
+on a branch the next scheduled run overwrites.
 
 ### `rov library` commands
 
@@ -125,9 +135,15 @@ rov library gui          # open the Library Manager GUI
 ```
 
 `library sync` never pushes, but it does fetch and fast-forward, so point it at
-the library and never at a board. `library contribute` validates first, stages
+the library and never at a board. Both of its Git commands are bounded, so a
+remote that stops answering is reported as `BLOCKED` with the cached revision
+kept instead of hanging the caller. `library contribute` validates first, stages
 only `Symbols/`, `Footprints/`, `3D_Models/`, and `Design_Blocks/`, and pushes
 only the new `add-part-*` branch.
+
+`library list` and `library search` are the machine-readable pair: the rows go to
+standard output and the `[PASS]`/`[BLOCKED]` summary goes to standard error, so
+`rov library list | ...` never has to filter a status line out of a part table.
 
 ## Exit codes
 
@@ -156,13 +172,40 @@ broken design.
 - **Optional auto-merge is explicit.** The reusable update workflow only enables
   `gh pr merge --auto` when a pull request was actually created and the board
   passes `auto-merge: true`.
+- **Every Git command that can leave the machine is time-bounded.** A library
+  fetch, submodule init, fast-forward, or `gh` call that stops answering is
+  reported, never waited on, so a launcher or the Library Manager cannot hang on
+  a sleeping remote.
+
+## The scheduled update branch
+
+`update-library.yml` publishes the library update on one long-lived branch,
+`chore/library-update`, and reuses the open pull request for it. That reuse is
+deliberate and it is the reason a run can stop with "already points at a
+different commit": the CLI refuses to push over a branch it did not create in
+this run rather than force-pushing a reviewer's work.
+
+The workflow therefore **reports** the reuse state in the job summary before it
+does anything, and it never cleans up: nothing is force pushed, no branch is
+deleted, and no pull request is closed or reopened.
+
+**Repository setting required for the weekly run to keep working.** Enable
+*Settings -> General -> Pull Requests -> Automatically delete head branches*
+in each board repository. That deletes `chore/library-update` once its pull
+request merges, so the next scheduled run recreates it from the current base.
+Without the setting the merged branch lingers, the next run stops with a
+`BLOCKED` naming the stale commit, and a human has to delete the branch by
+hand. Enabling the setting is a one-time owner action; the workflow cannot do it
+for you, and it will not delete a branch on your behalf.
 
 ## The `.pcb-devops-cache` contract
 
 A board does not vendor this repository. `LAUNCH_KICAD` makes a shallow clone of
 `purduerov/pcb-devops` into `.pcb-devops-cache/` and runs the CLI from there;
 `bootstrap.py` and the generated `.rov-hooks/pre-commit` resolve the CLI the same
-way. `rov_bridge.py` in the library repository uses the same cache.
+way. `rov_bridge.py` in the library repository uses the same cache, and looks for
+it both inside a library checkout and at the root of a board that owns the
+library as a submodule.
 
 The cache is a **whole-repository** copy, not a single script. `rov.py` imports
 `rov_core.py` and `sync_project_libs.py`, so `scripts/` must stay intact. Do not
@@ -215,18 +258,27 @@ Maintenance and comparison:
 ### `.github/workflows/`
 
 - `run-kicad-ci.yml`: reusable board workflow. Its steps run in this order:
-  check out the board, check out the platform tools into `pcb-devops-tools`,
-  set up Python, install dependencies, verify no merge conflict markers, verify
-  the central library submodule, run the central symbol linter, **run the shared
-  `rov board validate`**, configure the KiBot preflight rules, resolve the
-  design file names, run KiBot ERC/DRC and the manufacturing exports, run the
-  sourcing check, generate the portal page and job summary, upload the
-  artifacts, and deploy the interactive BOM to GitHub Pages on `master`/`main`.
-  The shared validation deliberately sits after the conflict-marker, submodule,
-  and linter checks so those cheap failures are reported first, and before KiBot
-  so a manifest failure is reported before any export work.
-- `update-library.yml`: reusable validated library-update workflow. Opens a
-  `chore/library-update` pull request; never pushes the base branch.
+  check out the board, set up Python, **resolve `platform_ref` from the board's
+  `rov.project.json`**, check out the platform tools into `pcb-devops-tools` at
+  that ref, install dependencies, verify no merge conflict markers, verify the
+  central library submodule, **run the shared `rov board validate`**, configure
+  the KiBot preflight rules, resolve the design file names, run KiBot ERC/DRC and
+  the manufacturing exports, run the sourcing check, generate the portal page and
+  job summary, upload the artifacts, and deploy the interactive BOM to GitHub
+  Pages on `master`/`main`.
+  The platform-ref step is what makes `platform_ref` in the manifest real: it
+  fails closed when the key is missing, empty, or malformed, and the checkout then
+  pins the validating revision instead of the platform's default branch. The
+  shared validation deliberately sits after the conflict-marker and submodule
+  checks so those cheap failures are reported first, and before KiBot so a
+  manifest failure is reported before any export work. It is also the single owner
+  of the central symbol lint in board CI, so no separate linter step duplicates
+  the same run over the same files.
+- `update-library.yml`: reusable validated library-update workflow. Reports the
+  update-branch and pull-request reuse state in the job summary, then opens a
+  `chore/library-update` pull request; never pushes the base branch, never force
+  pushes, and never deletes a branch or closes a pull request. See "The
+  scheduled update branch" above for the repository setting it depends on.
 - `devops-ci.yml`: runs the Python compile and test suite on Windows, Linux, and
   macOS.
 
@@ -254,11 +306,17 @@ jobs:
     uses: purduerov/pcb-devops/.github/workflows/run-kicad-ci.yml@master
 ```
 
-Library updates use a second reusable call:
+Library updates use a second reusable call. A reusable workflow can only narrow
+the caller's token, never widen it, so the caller has to grant what the called
+workflow asks for; without its own `permissions:` block the call is clamped to
+the repository default, which is read-only on several boards:
 
 ```yaml
 jobs:
   update-library:
+    permissions:
+      contents: write
+      pull-requests: write
     uses: purduerov/pcb-devops/.github/workflows/update-library.yml@master
     with:
       library-path: libs/purdue-rov-kicad-lib
@@ -321,27 +379,26 @@ while still using the first. A human should decide which one is canonical.
 
 The remaining follow-ups:
 
-1. **Legacy tracked `.githooks/pre-commit` may still reach the network.**
-   Boards created before this platform shipped, and the board template itself,
-   still carry a tracked `.githooks/` hook that runs `git fetch`/`git pull`
-   against the library submodule and can stage a submodule change during an
-   ordinary `git commit`. New boards get the untracked `.rov-hooks/` hook
-   instead, which only validates and never syncs. The legacy files were left in
-   place because they are teammate-authored; removing or rewriting them is a
-   separate, owner-approved change. Until then, use `--no-verify` if a hook
-   surprises you, and check `git status` before you commit.
-2. **Board update wrappers rely on repository default permissions.** The
-   reusable `update-library.yml` declares least-privilege
-   `contents: write` and `pull-requests: write`, but the thin wrappers in each
-   board's `.github/workflows/auto-update-submodule.yml` do not declare a
-   `permissions:` block of their own, so they inherit whatever the repository
-   default is. Adding explicit least-privilege blocks would mean rewriting
-   eight already-correct commits; it is queued as an owner-approved follow-up.
-3. **`prepare_library_contribution` runs the linter and then publishes.** The
+1. **The legacy tracked `.githooks/pre-commit` is a pre-bootstrap exposure.**
+   The exposure is not the hook's behaviour alone but *when* it can run: it is
+   active from the first `git commit` in a board, which is before `LAUNCH_KICAD`
+   or `python bootstrap.py` has installed the untracked `.rov-hooks/` hook and set
+   `core.hooksPath`. Until bootstrap runs, an ordinary commit on a board created
+   before this platform shipped, or on the board template itself, can execute a
+   hook that reaches the network (`git fetch`/`git pull` against the library
+   submodule) and stages a submodule change as a side effect. New boards do not
+   have this window: the template installs the safe hook during the first
+   bootstrap, and that hook only validates.
+   The tracked `.githooks/` files were left in place because they are
+   teammate-authored; removing or rewriting them is a separate, owner-approved
+   change. The exposure is documented rather than silently closed, and the
+   mitigation a member has today is `--no-verify` plus a `git status` check before
+   committing.
+2. **`prepare_library_contribution` runs the linter and then publishes.** The
    contribution flow validates before committing, but the pull request it opens
    is not guaranteed to already have its board/library checks green. The
    protected branch plus required checks is what protects the library today.
-4. **`rov board validate --full` does not run the manufacturing export.** The
+3. **`rov board validate --full` does not run the manufacturing export.** The
    platform spec says full validation "additionally runs the current KiCad
    validation and manufacturing-export path". What is implemented runs
    `kicad-cli sch erc` and `kicad-cli pcb drc` and nothing else. The KiBot
@@ -349,7 +406,9 @@ The remaining follow-ups:
    separate `run_local_validation` scripts, so a local `--full` pass does not
    prove the export step would succeed. Closing this means either wiring KiBot
    into the CLI or documenting `--full` as ERC/DRC only; it needs a decision.
-5. **The Linux hardware-check list from the spec is not implemented.** The spec
+   What *is* aligned is the severity policy: `--full` fails a board only where
+   `kibot_master.yaml` at `severity: error` would.
+4. **The Linux hardware-check list from the spec is not implemented.** The spec
    calls for a Linux job covering zone-fill checks, symbol-library validation,
    footprint and 3D-link validation, a KiBot manufacturing-export smoke test, a
    template bootstrap test, and one representative board validation. None of
@@ -357,3 +416,8 @@ The remaining follow-ups:
    `run-kicad-ci.yml` covers part of the intent incidentally, and the template
    bootstrap path is covered by unit tests, but there is no job that asserts the
    list. Recorded so the gap is not mistaken for a finished rollout phase.
+5. **The board repositories need one owner-enabled repository setting.** Enable
+   *Automatically delete head branches* in each board repository, or a merged
+   `chore/library-update` branch lingers and the next scheduled run stops with a
+   `BLOCKED` until a human deletes it. See "The scheduled update branch"; the
+   update workflow deliberately never deletes a branch itself.
