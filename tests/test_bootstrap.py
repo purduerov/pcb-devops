@@ -115,12 +115,31 @@ def combined_output(result: subprocess.CompletedProcess[str]) -> str:
     """Return both captured streams as one string, for assertion messages.
 
     A bare ``result.stdout + result.stderr`` raises ``TypeError`` when the
-    platform hands back ``None`` for a stream instead of text. The Windows
-    runner did exactly that for the launcher's no-project-file path, which hid
-    the real assertion behind a type error. An absent stream is reported as
-    empty so a failure names the behavior under test instead of ``NoneType``.
+    platform hands back ``None`` for a stream instead of text. Treating an
+    absent stream as empty keeps a failure naming the behavior under test
+    instead of ``NoneType``.
     """
     return (result.stdout or "") + (result.stderr or "")
+
+
+# Where the generated test wrapper redirects the launcher's combined output.
+WRAPPER_OUTPUT_NAME = "_launcher_output.txt"
+
+
+def wrapper_output(board: Path) -> str:
+    """Return what the launcher printed, as captured by the test wrapper.
+
+    The wrapper redirects the launcher's stdout and stderr into a file instead
+    of leaving them on a pipe, because the Windows runner does not reliably hand
+    the launcher's stdout back through a pipe: it returned ``None`` there while
+    the launcher itself behaved correctly. Reading the file keeps these
+    assertions exact on every platform rather than skipping them where a pipe
+    misbehaves.
+    """
+    path = board / "launchbin" / WRAPPER_OUTPUT_NAME
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def write_executable(path: Path, text: str) -> None:
@@ -1299,7 +1318,11 @@ class TestShellLauncherControlFlow(unittest.TestCase):
             "export ROV_LAUNCH_DRY_RUN=1\n"
             "t=$1\n"
             "shift\n"
-            'exec "$BASH" "$t" "$@"\n',
+            # The launcher's combined output goes to a file rather than a pipe.
+            # The Windows runner does not always hand the launcher's stdout back
+            # through a pipe, so a test that asserts on the captured streams sees
+            # nothing there. The file keeps every assertion exact everywhere.
+            f'exec "$BASH" "$t" "$@" >"{posix_bin}/{WRAPPER_OUTPUT_NAME}" 2>&1\n',
         )
         return f"{posix_bin}/_wrap.sh"
 
@@ -1380,7 +1403,7 @@ class TestShellLauncherControlFlow(unittest.TestCase):
                         wrapper=wrapper,
                     )
                     self.assert_kicad_never_started(board)
-                    output = combined_output(result)
+                    output = wrapper_output(board)
                     self.assertEqual(result.returncode, code, output)
                     self.assertIn(f"STUB_BOOTSTRAP_RC={code}", output)
                     self.assertIn("Launching KiCad", output)
@@ -1397,7 +1420,7 @@ class TestShellLauncherControlFlow(unittest.TestCase):
             wrapper = self.build_wrapper(shell, board, restricted=True)
             result = run_script(shell, board / "LAUNCH_KICAD.sh", cwd=board, wrapper=wrapper)
             self.assert_kicad_never_started(board)
-            output = combined_output(result)
+            output = wrapper_output(board)
         self.assertEqual(result.returncode, 2, output)
         self.assertIn("Python is required to prepare this board", output)
         self.assertIn("Opening: Demo.kicad_pro", output)
@@ -1416,15 +1439,9 @@ class TestShellLauncherControlFlow(unittest.TestCase):
                     result = run_script(
                         shell, board / "LAUNCH_KICAD.sh", cwd=board, wrapper=wrapper
                     )
-                    output = combined_output(result)
+                    output = wrapper_output(board)
                 self.assertEqual(result.returncode, expected, output)
-                self.assertIn(
-                    "No .kicad_pro project file found",
-                    output,
-                    f"DIAG shell={shell!r} args={result.args!r} rc={result.returncode} "
-                    f"stdout={result.stdout!r} stderr={result.stderr!r} "
-                    f"board={str(board)!r} script_exists={(board / 'LAUNCH_KICAD.sh').exists()}",
-                )
+                self.assertIn("No .kicad_pro project file found", output)
 
 
 class TestCollectionIntegrity(unittest.TestCase):
