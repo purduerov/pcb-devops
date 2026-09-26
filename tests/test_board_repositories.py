@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import rov_core  # noqa: E402
 
-# The eight repositories that adopt the platform contract.
+# The nine repositories that adopt the platform contract.
 TEMPLATE_DIR_NAME = "Board_Template"
 BOARDS_DIR_NAME = "Boards"
 
@@ -83,9 +83,9 @@ class BoardRepositoryTestCase(unittest.TestCase):
                 "no board repositories were found next to "
                 f"{ROOT}; the cross-repository contract cannot be checked here"
             )
-        if len(cls.roots) != 8:
+        if len(cls.roots) != 9:
             raise AssertionError(
-                f"expected the template plus seven boards, found {len(cls.roots)}: "
+                f"expected the template plus eight boards, found {len(cls.roots)}: "
                 f"{[root.name for root in cls.roots]}"
             )
 
