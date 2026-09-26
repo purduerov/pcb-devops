@@ -1102,22 +1102,36 @@ def _failed_gh(args: list[str], detail: str) -> subprocess.CompletedProcess[str]
 
 
 def _existing_pull_request_url(root: Path, branch: str) -> str | None:
-    """Return the URL of an open pull request for ``branch``, if one exists."""
+    """Return the URL of an open pull request for ``branch``, if one exists.
+
+    The lookup is scoped to open pull requests on purpose. Resolving the branch
+    without a state filter also matches a pull request that was closed without
+    its branch deleted, and the run would then report that closed pull request
+    as the result, so the board would silently never receive the update while
+    every run reported success.
+    """
     if not _gh_is_available():
         return None
     result = _run_gh(
-        ["pr", "view", branch, "--json", "url"],
+        [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+        ],
         cwd=root,
         timeout=GITHUB_CLI_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         return None
-    try:
-        payload = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return None
-    url = payload.get("url") if isinstance(payload, Mapping) else None
-    return url.strip() if isinstance(url, str) and url.strip() else None
+    url = (result.stdout or "").strip()
+    return url or None
 
 
 def _library_update_body(plan: LibraryUpdatePlan, relative_path: str) -> str:

@@ -170,10 +170,12 @@ class RecordingGitHub:
             if self.create_error:
                 return completed(1, "", f"{self.create_error}\n")
             return completed(0, f"{PR_URL}\n")
-        if args[:2] == ["pr", "view"]:
+        if args[:2] == ["pr", "list"]:
+            # The real lookup is scoped to open pull requests on the branch, so
+            # a closed pull request answers with no URL at all.
             if self.existing_url is None:
-                return completed(1, "", "no pull requests found for branch\n")
-            return completed(0, json.dumps({"url": self.existing_url}) + "\n")
+                return completed(0, "\n")
+            return completed(0, f"{self.existing_url}\n")
         raise AssertionError(f"unexpected gh invocation: {args}")
 
 
@@ -664,10 +666,61 @@ class TestApplyLibraryUpdate(LibraryUpdateTestCase):
         self.assertEqual(published, PR_URL)
         self.assertEqual(github.created, [], "an existing pull request must not be recreated")
         self.assertEqual(
-            github.calls, [["pr", "view", UPDATE_BRANCH, "--json", "url"]], github.calls
+            github.calls,
+            [
+                [
+                    "pr",
+                    "list",
+                    "--head",
+                    UPDATE_BRANCH,
+                    "--state",
+                    "open",
+                    "--json",
+                    "url",
+                    "--jq",
+                    ".[0].url // empty",
+                ]
+            ],
+            github.calls,
         )
         self.assertEqual(pushed, [], "an identical branch must not be pushed again")
         self.assertEqual(fixture.remote_heads(), remote_before)
+
+    def test_a_closed_pull_request_is_not_reported_as_the_update(self):
+        """A closed pull request must not be reused as a successful result.
+
+        The branch lookup used to resolve the branch with no state filter, which
+        also matched a pull request that was closed while its branch survived.
+        The run then reported that dead pull request as the outcome, so the board
+        silently never received the update while the workflow reported success.
+        """
+        fixture = self.fixture
+        fixture.publish()
+        with offline_github():
+            plan = rov_core.plan_library_update(fixture.board)
+        prepared = rov_core.apply_library_update(
+            fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE
+        )
+        self.assertEqual(prepared.status, rov_core.STATUS_PASS, prepared.message)
+        commit = fixture.board_head()
+        run_git(fixture.board, "push", "origin", f"{UPDATE_BRANCH}:{UPDATE_BRANCH}")
+
+        # No open pull request for the branch, which is what a closed one looks
+        # like to a state-scoped lookup.
+        github = RecordingGitHub(existing_url=None)
+        with mock.patch.object(
+            rov_core, "_gh_is_available", github.available
+        ), mock.patch.object(rov_core, "_run_gh", github.run):
+            published = rov_core._publish_update_branch(
+                fixture.board, UPDATE_BRANCH, commit, True, BASE_BRANCH, plan, LIBRARY_PATH
+            )
+
+        self.assertEqual(published, PR_URL, "a new pull request must be opened")
+        self.assertEqual(len(github.created), 1, github.created)
+        lookup = github.calls[0]
+        self.assertEqual(lookup[:2], ["pr", "list"])
+        self.assertIn("--state", lookup)
+        self.assertEqual(lookup[lookup.index("--state") + 1], "open")
 
     def test_pull_request_without_push_is_blocked_before_any_change(self):
         """create_pr without push is refused, not silently dropped."""
@@ -1086,7 +1139,12 @@ class TestBoardSyncLibraryCommand(LibraryUpdateTestCase):
         self.assertEqual(code, 0, output)
         self.assertIn(PR_URL, output)
         self.assertEqual(len(github.created), 1)
-        self.assertEqual(github.calls[0][:2], ["pr", "view"])
+        self.assertEqual(github.calls[0][:2], ["pr", "list"])
+        # The lookup is scoped to open pull requests on the branch.
+        self.assertIn("--state", github.calls[0])
+        self.assertEqual(
+            github.calls[0][github.calls[0].index("--state") + 1], "open"
+        )
         self.assertEqual(
             fixture.remote_heads()[f"refs/heads/{UPDATE_BRANCH}"], fixture.board_head()
         )
