@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ master, main ]
 
+# The validation job only reads the repository, compiles, and runs tests.
+permissions:
+  contents: read
+
 jobs:
   validate-tools:
     # The shared CLI is the entry point on Windows, Linux, and macOS, so the

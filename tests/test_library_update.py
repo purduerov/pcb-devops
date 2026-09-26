@@ -1064,5 +1064,167 @@ class TestBoardSyncLibraryCommand(LibraryUpdateTestCase):
         self.assertEqual(fixture.remote_heads(), {f"refs/heads/{BASE_BRANCH}": fixture.board_base_commit})
 
 
+class TestSyncLibraryMachineMarkers(LibraryUpdateTestCase):
+    """``rov board sync-library`` ends with exactly one marker line.
+
+    The reusable update workflow reads nothing but these markers, so they are
+    the published machine interface: ``PR_URL=<url>`` when an update pull
+    request is open for the update branch, ``NO_CHANGE`` when the board already
+    records the approved library revision, and no marker at all for every other
+    outcome. A marker never replaces the human report, and it never changes an
+    exit code.
+    """
+
+    def run_cli(self, *extra: str) -> tuple[int, str]:
+        """Run the command and return its exit code and printed output."""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = rov.main(
+                ["board", "sync-library", "--project-dir", str(self.fixture.board), *extra]
+            )
+        return code, buffer.getvalue()
+
+    def marker_lines(self, output: str) -> list[str]:
+        """Return every marker line in the order the CLI printed them."""
+        return [
+            line
+            for line in output.splitlines()
+            if line.startswith("PR_URL=") or line == "NO_CHANGE"
+        ]
+
+    def test_created_pull_request_ends_with_a_pr_url_marker(self):
+        """An opened pull request is reported as the final ``PR_URL=`` line."""
+        fixture = self.fixture
+        fixture.publish()
+        github = RecordingGitHub()
+
+        with mock.patch.object(rov_core, "_gh_is_available", github.available), mock.patch.object(
+            rov_core, "_run_gh", github.run
+        ):
+            code, output = self.run_cli("--apply", "--push", "--pr")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual([f"PR_URL={PR_URL}"], self.marker_lines(output))
+        self.assertEqual(
+            f"PR_URL={PR_URL}",
+            output.splitlines()[-1],
+            "the marker must be last so a caller can read the final line",
+        )
+        self.assertIn("[PASS] library-update:", output, "the human report is kept")
+        self.assertNotIn("NO_CHANGE", output)
+
+    def test_reused_pull_request_reports_the_existing_url(self):
+        """A pull request that already exists is reported, never duplicated."""
+        fixture = self.fixture
+        fixture.publish()
+        github = RecordingGitHub(existing_url=PR_URL)
+
+        with mock.patch.object(rov_core, "_gh_is_available", github.available), mock.patch.object(
+            rov_core, "_run_gh", github.run
+        ):
+            code, output = self.run_cli("--apply", "--push", "--pr")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual([f"PR_URL={PR_URL}"], self.marker_lines(output))
+        self.assertEqual([], github.created, "the existing pull request is reused")
+
+    def test_unchanged_library_ends_with_a_no_change_marker(self):
+        """A board that already records the approved revision reports NO_CHANGE."""
+        with offline_github():
+            code, output = self.run_cli("--apply", "--push", "--pr")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(["NO_CHANGE"], self.marker_lines(output))
+        self.assertEqual("NO_CHANGE", output.splitlines()[-1])
+        self.assertIn("[PASS] library-update:", output, "the human report is kept")
+
+    def test_a_spent_update_plan_reports_no_change(self):
+        """A stale plan that is already applied reports NO_CHANGE, not work."""
+        fixture = self.fixture
+        fixture.publish()
+        first = RecordingGitHub()
+        with mock.patch.object(rov_core, "_gh_is_available", first.available), mock.patch.object(
+            rov_core, "_run_gh", first.run
+        ):
+            self.assertEqual(self.run_cli("--apply", "--push", "--pr")[0], 0)
+        local_commit = fixture.board_head()
+        remote_before = fixture.remote_heads()
+
+        second = RecordingGitHub(existing_url=PR_URL)
+        with mock.patch.object(rov_core, "_gh_is_available", second.available), mock.patch.object(
+            rov_core, "_run_gh", second.run
+        ):
+            code, output = self.run_cli("--apply", "--push", "--pr")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(["NO_CHANGE"], self.marker_lines(output))
+        self.assertEqual([], second.calls, "an unchanged board must not touch GitHub")
+        self.assertEqual(fixture.board_head(), local_commit)
+        self.assertEqual(fixture.remote_heads(), remote_before)
+
+    def test_a_dry_run_reports_neither_marker(self):
+        """A dry run plans an update without claiming one was opened or needed."""
+        fixture = self.fixture
+        target = fixture.publish()
+
+        with offline_github():
+            code, output = self.run_cli()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(target, output)
+        self.assertEqual([], self.marker_lines(output))
+
+    def test_a_local_update_reports_neither_marker(self):
+        """A committed but unpublished update is neither a PR nor a no-op."""
+        fixture = self.fixture
+        fixture.publish()
+
+        with offline_github():
+            code, output = self.run_cli("--apply")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("[PASS] library-update:", output)
+        self.assertEqual(fixture.board_branch(), UPDATE_BRANCH)
+        self.assertEqual([], self.marker_lines(output))
+
+    def test_a_blocked_run_reports_no_marker(self):
+        """A blocked update never claims a pull request or a no-op."""
+        fixture = self.fixture
+        fixture.publish()
+        (fixture.board / "notes.txt").write_text("work in progress\n", encoding="utf-8")
+
+        with offline_github():
+            code, output = self.run_cli("--apply", "--push", "--pr")
+
+        self.assertEqual(code, 2, output)
+        self.assertIn("BLOCKED", output)
+        self.assertEqual([], self.marker_lines(output))
+
+    def test_markers_are_rendered_by_a_shared_helper(self):
+        """The marker rules live in one helper, not in the command handler."""
+        opened = rov_core.CheckResult(
+            "library-update", rov_core.STATUS_PASS, "opened", pull_request_url=PR_URL
+        )
+        current = rov_core.CheckResult(
+            "library-update", rov_core.STATUS_PASS, "current", no_change=True
+        )
+        plain = rov_core.CheckResult("library-update", rov_core.STATUS_PASS, "applied")
+
+        for results, expected in (
+            ([opened], f"PR_URL={PR_URL}"),
+            ([current], "NO_CHANGE"),
+            ([plain, opened], f"PR_URL={PR_URL}"),
+            ([opened, current], f"PR_URL={PR_URL}"),
+            ([plain], ""),
+            ([], ""),
+        ):
+            with self.subTest(expected=expected):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    rov.print_library_update_markers(results)
+                printed = buffer.getvalue().splitlines()
+                self.assertEqual([expected] if expected else [], printed)
+
+
 if __name__ == "__main__":
     unittest.main()

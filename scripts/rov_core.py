@@ -150,6 +150,11 @@ class CheckResult:
     name: str
     status: str
     message: str
+    # Machine-readable outcome for the commands automation drives. ``rov board
+    # sync-library`` turns these into the ``PR_URL=`` and ``NO_CHANGE`` markers,
+    # so a caller never has to read the human message to learn what happened.
+    pull_request_url: str = ""
+    no_change: bool = False
 
 
 @dataclass(frozen=True)
@@ -640,6 +645,12 @@ def apply_library_update(
     9. a pull request is opened only when the caller passes ``create_pr=True``,
        and an existing pull request for the branch is reused instead of
        duplicated.
+
+    The result also carries the machine-readable outcome: ``pull_request_url``
+    when a pull request is open for the update branch, and ``no_change`` when
+    the board already records the target commit. The CLI prints those as its
+    ``PR_URL=`` and ``NO_CHANGE`` markers, so automation never has to read this
+    message.
     """
     root = Path(project_dir)
     name = "library-update"
@@ -671,6 +682,7 @@ def apply_library_update(
             name,
             STATUS_PASS,
             f"the library submodule is already at {plan.target_commit}; nothing was changed.",
+            no_change=True,
         )
 
     update_branch = (branch_name or "").strip()
@@ -741,6 +753,7 @@ def apply_library_update(
             f"changed: 0 changed library file(s) and no commit on the planned "
             f"{plan.current_commit} -> {plan.target_commit} update. No branch, push, or "
             "pull request was created.",
+            no_change=True,
         )
 
     blocked = _select_update_branch(root, update_branch, base)
@@ -814,7 +827,9 @@ def apply_library_update(
     )
     if pull_request_url:
         summary = f"{summary}; pull request {pull_request_url}"
-    return CheckResult(name, STATUS_PASS, summary)
+    # The pull request URL travels as a field, not only inside the message, so
+    # the CLI can publish it as a marker without parsing this sentence.
+    return CheckResult(name, STATUS_PASS, summary, pull_request_url=pull_request_url)
 
 
 def _blocked_plan(reason: str) -> LibraryUpdatePlan:

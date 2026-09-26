@@ -50,6 +50,12 @@ SYMBOL_ROW_COLUMNS = ("name", "category", "MPN", "manufacturer")
 DEFAULT_SYNC_BRANCH = rov_core.LIBRARY_UPDATE_BRANCH
 DEFAULT_SYNC_COMMIT_MESSAGE = rov_core.LIBRARY_UPDATE_COMMIT_MESSAGE
 
+# The machine-readable markers ``rov board sync-library`` prints as its final
+# line. Automation depends on these exact spellings, so they are fixed here
+# instead of being written by each caller.
+PR_URL_MARKER_PREFIX = "PR_URL="
+NO_CHANGE_MARKER = "NO_CHANGE"
+
 # Tool timeouts in seconds. Doctor probes stay short so a missing or hung
 # service cannot stall a diagnosis; the heavy KiCad runs get a full allowance.
 PROBE_TIMEOUT_SECONDS = 20
@@ -77,6 +83,26 @@ def print_results(results: list[CheckResult]) -> None:
     """Render every result as plain text with a status tag."""
     for result in results:
         print(f"[{result.status}] {result.name}: {result.message}")
+
+
+def print_library_update_markers(results: list[CheckResult]) -> None:
+    """Print the final marker line of a library update run.
+
+    ``PR_URL=<url>`` is printed when an update pull request is open for the
+    update branch, and ``NO_CHANGE`` when the board already records the approved
+    library revision. Every other outcome prints nothing, so a caller can tell
+    "nothing to do" apart from "an update exists but was not published here".
+    At most one marker is printed, which is what makes it safe to read the last
+    line of the output. The markers are the machine interface of
+    ``rov board sync-library``: they are read by the reusable update workflow and
+    are printed after, never instead of, the human-readable report.
+    """
+    for result in results:
+        if result.pull_request_url:
+            print(f"{PR_URL_MARKER_PREFIX}{result.pull_request_url}")
+            return
+    if any(result.no_change for result in results):
+        print(NO_CHANGE_MARKER)
 
 
 def exit_code_for(results: list[CheckResult]) -> int:
@@ -574,7 +600,8 @@ def run_board_sync_library(
     ``--apply`` prepares the update branch named by ``--branch``, defaulting to
     ``chore/library-update``. Only ``--push`` publishes that branch, and only
     ``--push`` together with ``--pr`` opens a pull request. The protected base
-    branch is never committed to or pushed.
+    branch is never committed to or pushed. The command handler turns the
+    returned results into the ``PR_URL=`` and ``NO_CHANGE`` markers.
     """
     root = Path(project_dir)
     try:
@@ -1198,6 +1225,9 @@ def _cmd_board_sync_library(args: argparse.Namespace) -> int:
         create_pr=args.pr,
     )
     print_results(results)
+    # The marker is the last line so a workflow can read the outcome without
+    # parsing the report above it. The exit code is unchanged.
+    print_library_update_markers(results)
     return exit_code_for(results)
 
 

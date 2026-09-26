@@ -81,7 +81,9 @@ def key_values(block: str) -> dict[str, str]:
         if name in values:
             raise AssertionError(f"{name} is declared more than once")
         if child:
-            values[name] = "\n".join(line[len(indent) + 2:] for line in child)
+            body = [f"{name}: {inline}".rstrip()]
+            body += [line[len(indent) + 2:] for line in child]
+            values[name] = "\n".join(body)
         else:
             values[name] = inline
     return values
@@ -102,6 +104,38 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
     def test_update_workflow_uses_concurrency(self):
         self.assertIn("concurrency:", self.text)
         self.assertIn("cancel-in-progress: false", self.text)
+
+    def test_concurrency_is_keyed_on_the_update_branch(self):
+        # Two updates to the same branch must queue behind each other, and an
+        # unrelated ref must not cancel or block an update already running.
+        self.assertIn(
+            "group: library-update-${{ github.repository }}-${{ inputs.update-branch }}",
+            self.text,
+        )
+        self.assertNotIn("group: library-update-${{ github.repository }}-${{ github.ref }}", self.text)
+
+    def test_update_workflow_publishes_url_and_state_outputs(self):
+        outputs = key_values(nested_block(self.text, "outputs:"))
+        self.assertEqual(
+            {
+                "url": "${{ steps.update.outputs.url }}",
+                "state": "${{ steps.update.outputs.state }}",
+            },
+            outputs,
+            "a calling board can only read the update result through these outputs",
+        )
+
+    def test_update_workflow_consumes_only_the_cli_markers(self):
+        # PR_URL= and NO_CHANGE are the CLI contract. Scraping the human report
+        # would make a reworded message silently change the workflow's result.
+        self.assertIn("s|^PR_URL=||p", self.text)
+        self.assertIn("NO_CHANGE", self.text)
+        self.assertNotIn("/pull/[0-9]", self.text)
+        self.assertNotIn("pull request \\(", self.text)
+        self.assertNotIn(".*pull request", self.text)
+        # Neither marker present on a successful run is a failure, never a
+        # silent "up to date".
+        self.assertIn("::error::The CLI reported neither PR_URL= nor NO_CHANGE", self.text)
 
     def test_update_workflow_declares_every_documented_input(self):
         inputs = key_values(nested_block(self.text, "inputs:"))
@@ -130,6 +164,13 @@ class TestUpdateLibraryWorkflow(unittest.TestCase):
         auto_merge = inputs["auto-merge"]
         self.assertIn("type: boolean", auto_merge)
         self.assertIn("default: false", auto_merge)
+
+    def test_library_path_is_documented_as_a_fail_closed_cross_check(self):
+        # The manifest is the source of truth. The input is a cross-check that
+        # must fail closed, not a way to point the update somewhere else.
+        description = key_values(nested_block(self.text, "inputs:"))["library-path"]
+        self.assertIn("cross-check", description)
+        self.assertIn("blocked", description)
 
     def test_update_workflow_uses_least_privilege_permissions(self):
         permissions = key_values(nested_block(self.text, "permissions:"))
@@ -219,6 +260,10 @@ class TestDevOpsWorkflowContracts(unittest.TestCase):
 
     def test_validation_checks_every_workflow_in_the_repository(self):
         self.assertIn("'.github/workflows'", self.text)
+
+    def test_validation_requests_read_only_permissions(self):
+        permissions = key_values(nested_block(self.text, "permissions:"))
+        self.assertEqual({"contents": "read"}, permissions)
 
 
 class TestWorkflowFilesAreValidYaml(unittest.TestCase):
