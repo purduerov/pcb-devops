@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -53,6 +54,35 @@ def posix_shell() -> str | None:
     return None
 
 
+def bash_shell() -> str | None:
+    """Return a bash that can parse and run ``LAUNCH_KICAD.sh`` in a temp tree.
+
+    The macOS/Linux launcher is a bash script, not a POSIX ``sh`` script: it uses
+    ``BASH_SOURCE`` and ``[[ ... ]]``. ``posix_shell`` may return ``sh`` or
+    ``dash``, so the launcher tests need a probe of their own that insists on
+    bash. On Windows the WSL ``bash.exe`` is what provides it.
+    """
+    for candidate in ("bash",):
+        path = shutil.which(candidate)
+        if path is None:
+            continue
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            probe = Path(tmp) / "probe.sh"
+            write_executable(
+                probe,
+                "#!/usr/bin/env bash\n"
+                'if [ "${BASH_SOURCE[0]:-}" = "" ]; then exit 3; fi\n'
+                'if [[ "a" == "a" ]]; then printf BASH_OK; else exit 4; fi\n',
+            )
+            try:
+                result = run_script(path, probe, cwd=Path(tmp))
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if result.returncode == 0 and "BASH_OK" in result.stdout:
+                return path
+    return None
+
+
 def posix_path(shell: str, directory: Path) -> str:
     """Return the POSIX path of ``directory`` as the shell itself sees it."""
     result = subprocess.run(
@@ -97,9 +127,9 @@ class RecordingGit:
         self._real_run_git = real_run_git
         self.calls = []
 
-    def __call__(self, repo_dir, *args, check=False):
+    def __call__(self, repo_dir, *args, check=False, timeout=None):
         self.calls.append(tuple(args))
-        return self._real_run_git(repo_dir, *args, check=check)
+        return self._real_run_git(repo_dir, *args, check=check, timeout=timeout)
 
 
 class GitFixtureMixin:
@@ -397,6 +427,137 @@ class TestBootstrapSafety(GitFixtureMixin, unittest.TestCase):
                 any(message.startswith("[BLOCKED]") and "submodule" in message.lower() for message in result.messages),
                 f"expected a BLOCKED submodule message, got {result.messages}",
             )
+
+
+class TestBootstrapGitTimeouts(GitFixtureMixin, unittest.TestCase):
+    """Every bootstrap Git call that can leave the machine is bounded.
+
+    Important I8. The library ``fetch`` was the only bounded call, so a remote
+    that accepted the connection and then stopped answering would hang
+    ``LAUNCH_KICAD`` forever instead of warning that the cached revision was
+    kept. These tests pin the bounds on the three bootstrap network commands and
+    on the plan's fetch, and assert the timeout is reported like any other
+    unreachable remote.
+    """
+
+    LIB_PATH = "libs/purdue-rov-kicad-lib"
+
+    def make_template(self, root: Path) -> None:
+        TestBootstrap.make_template(self, root)
+
+    def make_board(self, base: Path) -> Path:
+        remote, seed = self.make_library_remote(base)
+        self.init_repo(base)
+        (base / ".gitmodules").write_text(
+            f'[submodule "{self.LIB_PATH}"]\n'
+            f"\tpath = {self.LIB_PATH}\n"
+            f"\turl = {remote.as_posix()}\n"
+            "\tbranch = master\n",
+            encoding="utf-8",
+        )
+        self.git(base, "clone", "-q", str(remote), self.LIB_PATH)
+        self.make_template(base)
+        return base
+
+    @staticmethod
+    def timeouts_of(real_run_git, hang_on: str):
+        """Wrap ``run_git`` to record timeouts and hang on one verb."""
+
+        def recording(repo_dir, *args, check=False, timeout=None):
+            if args[:1] == (hang_on,):
+                raise subprocess.TimeoutExpired(cmd="git", timeout=timeout or 0)
+            return real_run_git(repo_dir, *args, check=check, timeout=timeout)
+
+        return recording
+
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_bootstrap_bounds_every_network_git_command(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = self.make_board(Path(tmp) / "board")
+            seen: dict[tuple[str, ...], object] = {}
+            real_run_git = rov_core.run_git
+
+            def recording(repo_dir, *args, check=False, timeout=None):
+                seen[tuple(args)] = timeout
+                return real_run_git(repo_dir, *args, check=check, timeout=timeout)
+
+            with mock.patch.object(rov_core, "run_git", recording):
+                rov_core.bootstrap_project(root, "Demo-Board")
+
+        self.assertEqual(
+            seen[("fetch", "origin", "master")], rov_core.LIBRARY_FETCH_TIMEOUT_SECONDS
+        )
+        self.assertEqual(
+            seen[("merge", "--ff-only", "origin/master")], rov_core.GIT_MERGE_TIMEOUT_SECONDS
+        )
+
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_bootstrap_warns_when_the_library_fetch_never_answers(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = self.make_board(Path(tmp) / "board")
+            real_run_git = rov_core.run_git
+
+            with mock.patch.object(
+                rov_core, "run_git", self.timeouts_of(real_run_git, "fetch")
+            ):
+                result = rov_core.bootstrap_project(root, "Demo-Board")
+
+        stale = [m for m in result.messages if "stale" in m.lower()]
+        self.assertTrue(stale, f"expected a stale-library warning, got {result.messages}")
+        self.assertTrue(
+            any("did not finish within" in message for message in stale),
+            f"expected the timeout to be named, got {stale}",
+        )
+        # A timeout keeps the cached revision, so the fast-forward is not claimed.
+        self.assertFalse(
+            [m for m in result.messages if m.startswith("[PASS]") and "origin/master" in m],
+            f"a timed-out fetch must not report the library as synced, got {result.messages}",
+        )
+
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_bootstrap_warns_when_the_fast_forward_never_answers(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = self.make_board(Path(tmp) / "board")
+            real_run_git = rov_core.run_git
+
+            with mock.patch.object(
+                rov_core, "run_git", self.timeouts_of(real_run_git, "merge")
+            ):
+                result = rov_core.bootstrap_project(root, "Demo-Board")
+
+        self.assertTrue(
+            any("did not finish within" in m and "stale" in m.lower() for m in result.messages),
+            f"expected a named timeout, got {result.messages}",
+        )
+
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_submodule_initialization_is_bounded(self):
+        """`submodule update --init --recursive` clones over the network too."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            self.make_template(root)
+            self.make_library_remote(root)
+            self.init_repo(root)
+            real_run_git = rov_core.run_git
+            seen: dict[tuple[str, ...], object] = {}
+
+            def recording(repo_dir, *args, check=False, timeout=None):
+                seen[tuple(args)] = timeout
+                if args[:1] == ("submodule",):
+                    raise subprocess.TimeoutExpired(cmd="git", timeout=timeout or 0)
+                return real_run_git(repo_dir, *args, check=check, timeout=timeout)
+
+            with mock.patch.object(rov_core, "run_git", recording):
+                result = rov_core.bootstrap_project(root, "Demo-Board")
+
+        self.assertEqual(
+            seen[("submodule", "update", "--init", "--recursive")],
+            rov_core.SUBMODULE_INIT_TIMEOUT_SECONDS,
+        )
+        self.assertTrue(
+            any("did not finish within" in m for m in result.messages),
+            f"expected the timeout to be named, got {result.messages}",
+        )
 
 
 class TestBootstrapIdempotence(GitFixtureMixin, unittest.TestCase):
@@ -1046,6 +1207,206 @@ class TestLaunchKicadControlFlow(unittest.TestCase):
         self.assertNotIn("checkout -B", text)
         self.assertIn("board bootstrap --project-dir", text)
         self.assertIn("kicad", text)
+
+
+class TestShellLauncherControlFlow(unittest.TestCase):
+    """The macOS/Linux launcher must mirror the Windows launcher's control flow.
+
+    Critical C2 regression guard. ``LAUNCH_KICAD.sh`` ran the bootstrap under an
+    unguarded ``set -e``, so a BLOCKED bootstrap aborted the launcher before the
+    KiCad open block and the member was left staring at a terminal instead of
+    their project. ``LAUNCH_KICAD.bat`` already captured the status, continued to
+    the open block, and returned the captured code; these tests assert the shell
+    launcher does the same, by actually running it under bash.
+
+    No real KiCad process is ever started: the launcher is run with
+    ``ROV_LAUNCH_DRY_RUN=1`` and with a ``kicad`` shim on ``PATH`` that records
+    any attempt to launch, which the tests then assert never happened.
+    """
+
+    SH = DEVOPS_DIR / "scripts" / "LAUNCH_KICAD.sh"
+    OPEN_MARKER = "# 3. Locate and Launch KiCad Project"
+
+    # A self-contained dirname. The restricted-PATH test replaces PATH with
+    # only this directory, so the launcher must still be able to resolve
+    # SCRIPT_DIR without any external command.
+    DIRNAME_SHIM = (
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  */*) printf '%s\\n' \"${1%/*}\" ;;\n"
+        "  *) printf '.\\n' ;;\n"
+        "esac\n"
+    )
+
+    def build_board(
+        self, root: Path, bootstrap_exit: int, python_names: tuple[str, ...] = ("python3", "python")
+    ) -> Path:
+        """Create a board directory holding a copy of the launcher and stubs.
+
+        The stub interpreter reports the exit code the real CLI would return and
+        then exits with it, so the launcher's captured status is observable
+        without starting a real Python, and the test behaves the same on WSL,
+        Linux, and macOS. The ``kicad`` shim would leave a marker file if the
+        launcher ever tried to start KiCad.
+        """
+        board = root / "board"
+        board.mkdir(parents=True)
+        write_executable(board / "LAUNCH_KICAD.sh", self.SH.read_text(encoding="utf-8"))
+        (board / "Demo.kicad_pro").write_text('{"project": {}}', encoding="utf-8")
+        bin_dir = board / "launchbin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "dirname", self.DIRNAME_SHIM)
+        write_executable(bin_dir / "kicad", f'#!/bin/sh\ntouch "{board / "KICAD_WAS_STARTED"}"\n')
+        write_executable(bin_dir / "git", "#!/bin/sh\nexit 0\n")
+        for name in python_names:
+            write_executable(
+                bin_dir / name,
+                f'#!/bin/sh\necho "STUB_BOOTSTRAP_RC={bootstrap_exit}"\nexit {bootstrap_exit}\n',
+            )
+        return board
+
+    def build_wrapper(self, shell: str, board: Path, restricted: bool = False) -> str:
+        """Return a wrapper that exposes the stub ``PATH`` to the launcher.
+
+        ``restricted`` replaces ``PATH`` outright instead of prepending, so the
+        launcher can find no interpreter at all. The stub directory carries a
+        self-contained ``dirname`` so ``SCRIPT_DIR`` still resolves.
+
+        ``ROV_LAUNCH_DRY_RUN`` is exported from the wrapper rather than passed in
+        the process environment because the WSL ``bash.exe`` launcher drops
+        custom variables, which would silently run the real open block.
+        """
+        posix_bin = posix_path(shell, board / "launchbin")
+        wrapper = board / "launchbin" / "_wrap.sh"
+        path = f'PATH="{posix_bin}"' if restricted else f'PATH="{posix_bin}:$PATH"'
+        write_executable(
+            wrapper,
+            "#!/bin/bash\n"
+            f"{path}\n"
+            "export PATH\n"
+            "export ROV_LAUNCH_DRY_RUN=1\n"
+            "t=$1\n"
+            "shift\n"
+            'exec "$BASH" "$t" "$@"\n',
+        )
+        return f"{posix_bin}/_wrap.sh"
+
+    def check_syntax(self, shell: str, script: Path) -> subprocess.CompletedProcess[str]:
+        """Parse ``script`` without running it.
+
+        The ``-n`` flag has to precede the script path: the launcher treats its
+        first argument as a board directory, so ``bash script -n`` would run it
+        with ``-n`` as the target directory.
+        """
+        target = f"{posix_path(shell, script.parent)}/{script.name}"
+        return subprocess.run(
+            [shell, "-n", target], capture_output=True, text=True, timeout=60
+        )
+
+    def assert_kicad_never_started(self, board: Path) -> None:
+        """Fail if the stub ``kicad`` shim was ever executed.
+
+        The launcher starts KiCad in the background, so the marker file can
+        appear a moment after the script returns. Polling briefly is what makes
+        this a real assertion instead of a race the test would usually win.
+        """
+        marker = board / "KICAD_WAS_STARTED"
+        for _ in range(30):
+            if marker.exists():
+                self.fail("the dry run started a KiCad process")
+            time.sleep(0.1)
+
+    def test_shell_launcher_parses_under_bash(self):
+        shell = bash_shell()
+        if shell is None:
+            self.skipTest("no bash is available to parse the macOS/Linux launcher")
+        result = self.check_syntax(shell, self.SH)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bad_syntax_is_rejected_so_the_parser_check_means_something(self):
+        shell = bash_shell()
+        if shell is None:
+            self.skipTest("no bash is available to parse the macOS/Linux launcher")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            broken = Path(tmp) / "broken.sh"
+            write_executable(broken, "#!/usr/bin/env bash\nif [ 1 -eq 1 ; then\n")
+            result = self.check_syntax(shell, broken)
+        self.assertNotEqual(result.returncode, 0, "the parser check must reject bad syntax")
+
+    def test_shell_launcher_never_exits_before_the_open_block(self):
+        """No unconditional abort may sit between the bootstrap and the open block."""
+        text = self.SH.read_text(encoding="utf-8")
+        self.assertIn(self.OPEN_MARKER, text)
+        head, _, tail = text.partition(self.OPEN_MARKER)
+        # A guarded capture is required on both interpreter branches.
+        self.assertEqual(head.count("|| BOOTSTRAP_RC=$?"), 2)
+        self.assertIn("BOOTSTRAP_RC=2", head)
+        # A bare `exit` in the head would abort before KiCad opens.
+        self.assertNotIn("exit 2\n", head, "the bootstrap must not exit before KiCad opens")
+        # The captured status is what the script finally returns.
+        self.assertIn('exit "$BOOTSTRAP_RC"', tail)
+
+    def test_shell_launcher_propagates_bootstrap_codes_and_opens_kicad(self):
+        """Every bootstrap exit code is returned, and KiCad is still opened.
+
+        The stub ``kicad`` shim writes a marker file if it is ever executed, so
+        ``ROV_LAUNCH_DRY_RUN`` is proven to prevent a real launch.
+        """
+        shell = bash_shell()
+        if shell is None:
+            self.skipTest("no bash is available to run the macOS/Linux launcher")
+        for code in (0, 1, 2):
+            with self.subTest(code=code):
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                    board = self.build_board(Path(tmp), code)
+                    wrapper = self.build_wrapper(shell, board)
+                    env = dict(os.environ, ROV_LAUNCH_DRY_RUN="1")
+                    result = run_script(
+                        shell,
+                        board / "LAUNCH_KICAD.sh",
+                        cwd=board,
+                        wrapper=wrapper,
+                    )
+                    self.assert_kicad_never_started(board)
+                    output = result.stdout + result.stderr
+                    self.assertEqual(result.returncode, code, output)
+                    self.assertIn(f"STUB_BOOTSTRAP_RC={code}", output)
+                    self.assertIn("Launching KiCad", output)
+                    self.assertIn("Opening: Demo.kicad_pro", output)
+                    self.assertIn("Dry run: not starting KiCad", output)
+
+    def test_shell_launcher_reports_missing_python_as_blocked_and_still_opens(self):
+        """A missing interpreter is BLOCKED (2), but KiCad still opens."""
+        shell = bash_shell()
+        if shell is None:
+            self.skipTest("no bash is available to run the macOS/Linux launcher")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            board = self.build_board(Path(tmp), 0, python_names=())
+            wrapper = self.build_wrapper(shell, board, restricted=True)
+            result = run_script(shell, board / "LAUNCH_KICAD.sh", cwd=board, wrapper=wrapper)
+            self.assert_kicad_never_started(board)
+            output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn("Python is required to prepare this board", output)
+        self.assertIn("Opening: Demo.kicad_pro", output)
+
+    def test_shell_launcher_returns_bootstrap_code_when_no_project_file_exists(self):
+        """With no project file the captured bootstrap code is still returned."""
+        shell = bash_shell()
+        if shell is None:
+            self.skipTest("no bash is available to run the macOS/Linux launcher")
+        for code, expected in ((0, 1), (2, 2)):
+            with self.subTest(code=code):
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                    board = self.build_board(Path(tmp), code)
+                    (board / "Demo.kicad_pro").unlink()
+                    wrapper = self.build_wrapper(shell, board)
+                    result = run_script(
+                        shell, board / "LAUNCH_KICAD.sh", cwd=board, wrapper=wrapper
+                    )
+                    output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, expected, output)
+                self.assertIn("No .kicad_pro project file found", output)
 
 
 class TestCollectionIntegrity(unittest.TestCase):

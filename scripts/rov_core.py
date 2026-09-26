@@ -55,11 +55,17 @@ CONTRIBUTION_BRANCH_PREFIX = "add-part-"
 LIBRARY_CONTRIBUTE_CHECK = "library-contribute"
 CONTRIBUTION_LINTER_FILE = "linter_validator.py"
 
-# A library fetch is the only command that can leave the machine. It is bounded
-# so an unreachable or hanging remote reports a blocked plan instead of hanging a
-# board; the GitHub CLI calls made while publishing a pull request are bounded
-# the same way.
+# Every Git and library operation that can leave the machine is bounded, so an
+# unreachable or hanging remote is reported as a blocked plan or a warned
+# bootstrap step instead of hanging a board's launcher. That covers the library
+# ``fetch`` in ``plan_library_update``, the ``submodule update``, ``fetch``, and
+# ``merge --ff-only`` in the bootstrap flow, and the ``fetch``/``merge`` pair in
+# ``rov.py library sync``; the GitHub CLI calls made while publishing a pull
+# request are bounded the same way. Add a new network operation here rather than
+# letting it inherit an unbounded wait.
 LIBRARY_FETCH_TIMEOUT_SECONDS = 60
+SUBMODULE_INIT_TIMEOUT_SECONDS = 300
+GIT_MERGE_TIMEOUT_SECONDS = 120
 GITHUB_CLI_TIMEOUT_SECONDS = 120
 LINTER_TIMEOUT_SECONDS = 300
 
@@ -479,6 +485,30 @@ def is_git_worktree(repo_dir: Path) -> bool:
     return run_git(repo_dir, "rev-parse", "--is-inside-work-tree").stdout.strip() == "true"
 
 
+def _run_bounded_git(
+    repo_dir: Path, timeout: float, *args: str
+) -> "subprocess.CompletedProcess[str] | CheckResult":
+    """Run one Git command with a hard time limit.
+
+    Returns the completed process, or a ``WARN``-tagged ``CheckResult`` whose
+    message is already formatted for a bootstrap note when the command exceeds
+    ``timeout``. A Git command that never answers must be reported, not waited
+    on, so a launcher cannot hang on a sleeping remote.
+    """
+    try:
+        return run_git(repo_dir, *args, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "library-submodule",
+            STATUS_WARN,
+            _note(
+                STATUS_WARN,
+                f"git {' '.join(args)} did not finish within {timeout} seconds, so it was "
+                "stopped; the cached library revision was kept and it may be stale.",
+            ),
+        )
+
+
 def is_clean_worktree(repo_dir: Path) -> bool:
     """Return True only when repo_dir is a work tree with no local changes.
 
@@ -639,12 +669,15 @@ def apply_library_update(
     6. the submodule moves with ``git checkout --detach``; ``reset --hard``,
        ``stash``, and ``clean`` are never used,
     7. only the configured submodule path is staged and committed,
-    8. ``origin/<branch>`` is pushed only when the caller passes ``push=True``,
+    8. from the moment the update branch is checked out, every BLOCKED result
+       names that branch, the base it was created from, and how to switch back,
+       so a post-switch failure is never reported without a way out,
+    9. ``origin/<branch>`` is pushed only when the caller passes ``push=True``,
        only for the update branch, and never when it already holds a different
        commit, and
-    9. a pull request is opened only when the caller passes ``create_pr=True``,
-       and an existing pull request for the branch is reused instead of
-       duplicated.
+    10. a pull request is opened only when the caller passes ``create_pr=True``,
+        and an existing pull request for the branch is reused instead of
+        duplicated.
 
     The result also carries the machine-readable outcome: ``pull_request_url``
     when a pull request is open for the update branch, and ``no_change`` when
@@ -760,56 +793,48 @@ def apply_library_update(
     if blocked is not None:
         return blocked
 
+    # From here the board checkout is already on the update branch, so a failure
+    # leaves the developer looking at a branch they did not ask for. Every
+    # remaining BLOCKED result therefore carries the recovery sentence.
+    def blocked_after_switch(reason: str) -> CheckResult:
+        return CheckResult(
+            name, STATUS_BLOCKED, f"{reason} {_update_branch_recovery(update_branch, base)}"
+        )
+
     checkout = run_git(library_dir, "checkout", "--detach", plan.target_commit)
     if checkout.returncode != 0:
-        return CheckResult(
-            name,
-            STATUS_BLOCKED,
-            f"could not check out library commit {plan.target_commit}: {_git_detail(checkout)}",
+        return blocked_after_switch(
+            f"could not check out library commit {plan.target_commit}: {_git_detail(checkout)}."
         )
     if _git_output(library_dir, "rev-parse", "HEAD") != plan.target_commit:
-        return CheckResult(
-            name,
-            STATUS_BLOCKED,
+        return blocked_after_switch(
             f"the library submodule is not at {plan.target_commit} after checkout, so "
-            "nothing was committed.",
+            "nothing was committed."
         )
 
     added = run_git(root, "add", "--", relative_path)
     if added.returncode != 0:
-        return CheckResult(
-            name,
-            STATUS_BLOCKED,
-            f"could not stage {relative_path}: {_git_detail(added)}",
-        )
+        return blocked_after_switch(f"could not stage {relative_path}: {_git_detail(added)}.")
     staged = tuple(_nonempty_lines(run_git(root, "diff", "--cached", "--name-only").stdout))
     if staged and staged != (relative_path,):
-        return CheckResult(
-            name,
-            STATUS_BLOCKED,
+        return blocked_after_switch(
             "refusing to commit staged changes outside the library submodule: "
-            f"{', '.join(staged)}.",
+            f"{', '.join(staged)}."
         )
 
     if staged:
         message = (commit_message or "").strip()
         if not message:
-            return CheckResult(
-                name, STATUS_BLOCKED, "a commit message is required to record the update."
-            )
+            return blocked_after_switch("a commit message is required to record the update.")
         committed = run_git(root, "commit", "-m", message)
         if committed.returncode != 0:
-            return CheckResult(
-                name,
-                STATUS_BLOCKED,
+            return blocked_after_switch(
                 f"could not commit the library update on {update_branch}: "
-                f"{_git_detail(committed)}",
+                f"{_git_detail(committed)}"
             )
     commit = _git_output(root, "rev-parse", "HEAD")
     if not commit:
-        return CheckResult(
-            name, STATUS_BLOCKED, f"could not resolve the commit on {update_branch}."
-        )
+        return blocked_after_switch(f"could not resolve the commit on {update_branch}.")
 
     pull_request_url = ""
     if push:
@@ -817,7 +842,7 @@ def apply_library_update(
             root, update_branch, commit, create_pr, base, plan, relative_path
         )
         if isinstance(published, CheckResult):
-            return published
+            return blocked_after_switch(published.message)
         pull_request_url = published
 
     summary = (
@@ -830,6 +855,24 @@ def apply_library_update(
     # The pull request URL travels as a field, not only inside the message, so
     # the CLI can publish it as a marker without parsing this sentence.
     return CheckResult(name, STATUS_PASS, summary, pull_request_url=pull_request_url)
+
+
+def _update_branch_recovery(update_branch: str, base: str) -> str:
+    """Name the branch the developer is now on and how to leave it.
+
+    ``apply_library_update`` switches the board onto the update branch before it
+    moves the submodule, so a later failure leaves the checkout somewhere the
+    developer did not choose. Reporting only the failure would leave them
+    guessing, and the update branch is a shared, bot-published branch they must
+    not keep working on. The sentence is fixed so the CLI, the tests, and CI
+    read one recovery contract.
+    """
+    return (
+        f"The board is now checked out on {update_branch}, created from {base}. Nothing was "
+        f"pushed and no pull request was opened. Return to {base} with "
+        f"'git switch {base}', then fix the cause and run the update again. Do not commit "
+        f"to {update_branch}: it is overwritten by the next scheduled update."
+    )
 
 
 def _blocked_plan(reason: str) -> LibraryUpdatePlan:
@@ -1872,7 +1915,12 @@ def _prepare_library_submodule(
                 )
             )
             return
-        result = run_git(root, "submodule", "update", "--init", "--recursive")
+        result = _run_bounded_git(
+            root, SUBMODULE_INIT_TIMEOUT_SECONDS, "submodule", "update", "--init", "--recursive"
+        )
+        if isinstance(result, CheckResult):
+            messages.append(result.message)
+            return
         if result.returncode == 0:
             messages.append(_note(STATUS_PASS, f"Initialized the library submodule at {relative_path}."))
         else:
@@ -1917,7 +1965,12 @@ def _prepare_library_submodule(
         )
         return
 
-    fetch = run_git(library_dir, "fetch", "origin", branch)
+    fetch = _run_bounded_git(
+        library_dir, LIBRARY_FETCH_TIMEOUT_SECONDS, "fetch", "origin", branch
+    )
+    if isinstance(fetch, CheckResult):
+        messages.append(fetch.message)
+        return
     if fetch.returncode != 0:
         messages.append(
             _note(
@@ -1928,7 +1981,12 @@ def _prepare_library_submodule(
         )
         return
 
-    merge = run_git(library_dir, "merge", "--ff-only", f"origin/{branch}")
+    merge = _run_bounded_git(
+        library_dir, GIT_MERGE_TIMEOUT_SECONDS, "merge", "--ff-only", f"origin/{branch}"
+    )
+    if isinstance(merge, CheckResult):
+        messages.append(merge.message)
+        return
     if merge.returncode != 0:
         messages.append(
             _note(

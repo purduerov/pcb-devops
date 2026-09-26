@@ -183,7 +183,7 @@ def read_only_git(stdout_for_rev_parse="false"):
     """
     calls: list[tuple] = []
 
-    def fake(repo_dir, *args, check=False):
+    def fake(repo_dir, *args, check=False, timeout=None):
         calls.append(tuple(args))
         if args and args[0] in FORBIDDEN_GIT_VERBS:
             raise AssertionError(f"tests must not run 'git {args[0]}': {args}")
@@ -375,14 +375,46 @@ class TestBoardValidate(unittest.TestCase):
             erc = next(call for call in calls if "erc" in call)
             drc = next(call for call in calls if "drc" in call)
         self.assertEqual(rov.exit_code_for(results), 0, results)
-        self.assertEqual(erc[:5], ["/usr/bin/kicad-cli", "sch", "erc", "--severity-all", "--exit-code-violations"])
+        self.assertEqual(erc[:5], ["/usr/bin/kicad-cli", "sch", "erc", "--severity-error", "--exit-code-violations"])
         self.assertEqual(erc[5], "-o")
         self.assertTrue(erc[6].endswith("erc.rpt"))
         self.assertEqual(Path(erc[7]), root / "Demo-Board.kicad_sch")
-        self.assertEqual(drc[:5], ["/usr/bin/kicad-cli", "pcb", "drc", "--severity-all", "--exit-code-violations"])
+        self.assertEqual(drc[:5], ["/usr/bin/kicad-cli", "pcb", "drc", "--severity-error", "--exit-code-violations"])
         self.assertEqual(drc[5], "-o")
         self.assertTrue(drc[6].endswith("drc.rpt"))
         self.assertEqual(Path(drc[7]), root / "Demo-Board.kicad_pcb")
+
+    def test_full_validation_uses_the_kibot_severity_policy(self):
+        """`--full` must not promote warnings to failures.
+
+        `kibot_master.yaml` runs its preflight at `severity: error`, so a local
+        `--full` that used `--severity-all` would report boards as broken that
+        CI accepts, and a local pass/fail would stop meaning the same thing as
+        the shared gate. The flag and the shared policy are asserted together
+        here so the two cannot drift apart.
+        """
+        self.assertEqual(rov.KICAD_SEVERITY_FLAG, "--severity-error")
+        kibot = (DEVOPS_DIR / "kibot_master.yaml").read_text(encoding="utf-8")
+        self.assertIn("severity: error", kibot)
+        # The relaxed non-strict CI path is the documented exception.
+        workflow = (DEVOPS_DIR / ".github/workflows/run-kicad-ci.yml").read_text(encoding="utf-8")
+        self.assertIn("sed -i 's/severity: error/severity: warning/g' local_kibot.yaml", workflow)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_board(Path(tmp))
+            calls, fake = recording_run_tool()
+            with patch.object(rov.shutil, "which", return_value="/usr/bin/kicad-cli"), patch.object(
+                rov, "_run_tool", fake
+            ):
+                rov.run_board_validate(root, full=True)
+        for call in calls:
+            if "kicad-cli" not in call[0]:
+                continue  # the symbol linter is not a kicad-cli invocation
+            with self.subTest(call=call[1:4]):
+                self.assertIn(rov.KICAD_SEVERITY_FLAG, call)
+                self.assertNotIn("--severity-all", call)
+        self.assertEqual(
+            sum("kicad-cli" in call[0] for call in calls), 2, "both ERC and DRC must run"
+        )
 
     def test_full_validation_fails_when_erc_reports_violations(self):
         def fake(command, cwd=None, timeout=None):
@@ -495,9 +527,11 @@ class TestLibraryCommands(unittest.TestCase):
 
     def test_library_sync_fast_forwards_and_never_pushes(self):
         calls: list[list[str]] = []
+        timeouts: list = []
 
-        def fake_run_git(repo_dir, *args, check=False):
+        def fake_run_git(repo_dir, *args, check=False, timeout=None):
             calls.append(list(args))
+            timeouts.append(timeout)
             stdout = "Already up to date.\n" if args[0] == "merge" else ""
             return completed(0, stdout)
 
@@ -515,11 +549,60 @@ class TestLibraryCommands(unittest.TestCase):
                 {call[0] for call in calls}
             )
         )
+        # Both network-facing Git commands must carry a hard time limit.
+        self.assertEqual(
+            timeouts,
+            [rov_core.LIBRARY_FETCH_TIMEOUT_SECONDS, rov_core.GIT_MERGE_TIMEOUT_SECONDS],
+        )
+
+    def test_library_sync_is_bounded_when_the_remote_never_answers(self):
+        """A hung remote is reported, never waited on.
+
+        `library sync` fetches and fast-forwards, so an unresponsive remote
+        would otherwise hang the Library Manager's own worker thread. The
+        timeout is turned into the same BLOCKED result an unreachable remote
+        produces, and the merge is never attempted.
+        """
+        calls: list[list[str]] = []
+
+        def fake_run_git(repo_dir, *args, check=False, timeout=None):
+            calls.append(list(args))
+            raise subprocess.TimeoutExpired(cmd="git", timeout=timeout or 0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            rov.shutil, "which", return_value="/usr/bin/git"
+        ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
+            rov_core, "is_clean_worktree", return_value=True
+        ), patch.object(rov_core, "run_git", fake_run_git):
+            result = rov.run_library_sync(Path(tmp))
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn(str(rov_core.LIBRARY_FETCH_TIMEOUT_SECONDS), result.message)
+        self.assertIn("stale", result.message)
+        self.assertEqual([call[0] for call in calls], ["fetch"])
+
+    def test_library_sync_reports_a_timeout_on_the_fast_forward(self):
+        """The fast-forward is bounded too, not only the fetch."""
+
+        def fake_run_git(repo_dir, *args, check=False, timeout=None):
+            if args[0] == "merge":
+                raise subprocess.TimeoutExpired(cmd="git", timeout=timeout or 0)
+            return completed(0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            rov.shutil, "which", return_value="/usr/bin/git"
+        ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
+            rov_core, "is_clean_worktree", return_value=True
+        ), patch.object(rov_core, "run_git", fake_run_git):
+            result = rov.run_library_sync(Path(tmp))
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn(str(rov_core.GIT_MERGE_TIMEOUT_SECONDS), result.message)
 
     def test_library_sync_blocks_an_unreachable_remote(self):
         calls: list[list[str]] = []
 
-        def fake_run_git(repo_dir, *args, check=False):
+        def fake_run_git(repo_dir, *args, check=False, timeout=None):
             calls.append(list(args))
             return completed(128, stderr="could not read from remote repository")
 
@@ -578,25 +661,60 @@ class TestLibraryCommands(unittest.TestCase):
     def test_library_list_prints_tab_separated_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             library = make_library(Path(tmp))
-            buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
                 code = rov.main(["library", "list", "--library-dir", str(library)])
         self.assertEqual(code, 0)
-        lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
-        self.assertEqual(lines[0], "name\tcategory\tMPN\tmanufacturer")
-        self.assertEqual(lines[1], "R_0603\tPassives\tRES-0603-10K\tYageo")
-        self.assertTrue(lines[2].startswith("[PASS] library-list:"), lines[2])
+        lines = [line for line in out.getvalue().splitlines() if line.strip()]
+        self.assertEqual(lines, ["name\tcategory\tMPN\tmanufacturer", "R_0603\tPassives\tRES-0603-10K\tYageo"])
+        self.assertIn("[PASS] library-list:", err.getvalue())
+
+    def test_library_rows_are_machine_readable_on_stdout_alone(self):
+        """The status summary must not be interleaved with the rows.
+
+        `rov library list` and `rov library search` are the two commands a script
+        pipes into another tool, so a `[PASS] library-list:` line on standard
+        output is a row a consumer has to filter out. The summary belongs on
+        standard error, where it is still visible to a human.
+        """
+        for command in (["library", "list"], ["library", "search", "yageo"]):
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    library = make_library(Path(tmp))
+                    out, err = io.StringIO(), io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(err):
+                        code = rov.main([*command, "--library-dir", str(library)])
+                self.assertEqual(code, 0)
+                rows = [line for line in out.getvalue().splitlines() if line.strip()]
+                self.assertTrue(rows)
+                for row in rows:
+                    with self.subTest(row=row):
+                        self.assertNotIn("[PASS]", row)
+                        self.assertNotIn("[BLOCKED]", row)
+                        self.assertEqual(len(row.split("\t")), len(rov.SYMBOL_ROW_COLUMNS))
+                self.assertIn("[PASS] library-", err.getvalue())
+
+    def test_a_blocked_row_listing_still_explains_itself_on_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library = Path(tmp) / "purdue-rov-kicad-lib"
+            (library / "Symbols").mkdir(parents=True)
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = rov.main(["library", "list", "--library-dir", str(library)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("BLOCKED", err.getvalue())
 
     def test_library_search_filters_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             library = make_library(Path(tmp))
             buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            with redirect_stdout(buffer), redirect_stderr(io.StringIO()):
                 code = rov.main(["library", "search", "yageo", "--library-dir", str(library)])
             self.assertEqual(code, 0)
             self.assertIn("R_0603\tPassives", buffer.getvalue())
             empty = io.StringIO()
-            with redirect_stdout(empty):
+            with redirect_stdout(empty), redirect_stderr(io.StringIO()):
                 self.assertEqual(rov.main(["library", "search", "nonexistent", "--library-dir", str(library)]), 0)
             self.assertNotIn("R_0603", empty.getvalue())
 
@@ -604,11 +722,11 @@ class TestLibraryCommands(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             library = Path(tmp) / "purdue-rov-kicad-lib"
             (library / "Symbols").mkdir(parents=True)
-            buffer = io.StringIO()
-            with redirect_stdout(buffer):
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 code = rov.main(["library", "list", "--library-dir", str(library)])
         self.assertEqual(code, 2)
-        self.assertIn("BLOCKED", buffer.getvalue())
+        self.assertIn("BLOCKED", err.getvalue())
 
     def test_library_import_forwards_remaining_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:

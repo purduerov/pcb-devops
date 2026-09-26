@@ -22,16 +22,20 @@ git config submodule.recurse true >/dev/null 2>&1 || true
 # 2. Prepare the board through the shared bootstrap: rename starter design
 # files, write rov.project.json, add standard library table entries, prepare
 # the library submodule, and install the untracked hook. The bootstrap never
-# resets, stashes, or overwrites local work.
+# resets, stashes, or overwrites local work. Its status is captured instead of
+# aborting the launcher, so KiCad still opens for a board whose bootstrap
+# reported BLOCKED, and that status is returned after the open attempt. This
+# mirrors LAUNCH_KICAD.bat exactly.
 echo "[2/3] Preparing board project, library tables, submodule, and hooks..."
 ROV_CLI="$SCRIPT_DIR/rov.py"
+BOOTSTRAP_RC=0
 if command -v python3 >/dev/null 2>&1; then
-    python3 "$ROV_CLI" board bootstrap --project-dir "$TARGET_DIR" --non-interactive
+    python3 "$ROV_CLI" board bootstrap --project-dir "$TARGET_DIR" --non-interactive || BOOTSTRAP_RC=$?
 elif command -v python >/dev/null 2>&1; then
-    python "$ROV_CLI" board bootstrap --project-dir "$TARGET_DIR" --non-interactive
+    python "$ROV_CLI" board bootstrap --project-dir "$TARGET_DIR" --non-interactive || BOOTSTRAP_RC=$?
 else
-    echo "Python is required to prepare this board." >&2
-    exit 2
+    echo "Python is required to prepare this board. Open KiCad manually or install Python." >&2
+    BOOTSTRAP_RC=2
 fi
 
 # 3. Locate and Launch KiCad Project
@@ -49,11 +53,27 @@ if [ -z "$PROJ" ]; then
     echo "==========================================================="
     echo "⚠️  No .kicad_pro project file found in $TARGET_DIR!"
     echo "==========================================================="
+    if [ "$BOOTSTRAP_RC" -ne 0 ]; then
+        exit "$BOOTSTRAP_RC"
+    fi
     exit 1
 fi
 
 echo "     Opening: $PROJ"
 echo ""
+
+# ROV_LAUNCH_DRY_RUN=1 runs every step except actually starting KiCad, so a
+# cross-platform launcher test can never launch KiCad or block on a desktop
+# file-association dialog.
+if [ "${ROV_LAUNCH_DRY_RUN:-}" = "1" ]; then
+    echo "     Dry run: not starting KiCad."
+    exit "$BOOTSTRAP_RC"
+fi
+
+# From here the launcher only starts a GUI application. Those commands are not
+# part of the bootstrap contract, so a failed launch must still return the
+# captured bootstrap status instead of aborting under "set -e".
+set +e
 
 # Detect OS and launch KiCad appropriately
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -93,3 +113,5 @@ else
         echo "⚠️  Please open '$PROJ' directly in KiCad."
     fi
 fi
+
+exit "$BOOTSTRAP_RC"

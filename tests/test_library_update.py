@@ -887,6 +887,75 @@ class TestApplyLibraryUpdate(LibraryUpdateTestCase):
         self.assertEqual(fixture.submodule_head(), fixture.initial_library_commit)
         self.assertTrue(fixture.board_clean())
 
+    def test_post_switch_failure_names_the_branch_and_how_to_return(self):
+        """Important I3: a failure after the branch switch must be actionable.
+
+        ``apply_library_update`` checks the update branch out before it moves the
+        submodule, so a failure after that point leaves the developer on a
+        shared, bot-published branch they did not choose. Reporting only the
+        failure would leave them guessing where they are and what to do.
+        """
+        fixture = self.fixture
+        fixture.publish()
+        with offline_github():
+            plan = rov_core.plan_library_update(fixture.board)
+        self.assertIsNone(plan.blocked_reason)
+
+        real_run_git = rov_core.run_git
+
+        def fail_add(repo_dir, *args, **kwargs):
+            if args[:1] == ("add",):
+                return completed(128, stderr="index file corrupt")
+            return real_run_git(repo_dir, *args, **kwargs)
+
+        with offline_github(), mock.patch.object(rov_core, "run_git", fail_add):
+            result = rov_core.apply_library_update(
+                fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE
+            )
+
+        self.assertEqual(result.status, rov_core.STATUS_BLOCKED, result.message)
+        self.assertIn("index file corrupt", result.message)
+        # The board really is on the update branch, so the message has to say so.
+        self.assertEqual(fixture.board_branch(), UPDATE_BRANCH)
+        self.assertIn(UPDATE_BRANCH, result.message)
+        self.assertIn(f"from {BASE_BRANCH}", result.message)
+        self.assertIn(f"git switch {BASE_BRANCH}", result.message)
+        self.assertIn("Nothing was pushed", result.message)
+        self.assertIn("no pull request was opened", result.message)
+
+    def test_post_switch_failure_does_not_leave_a_stale_staging_area(self):
+        """The recovery path must not imply work was published."""
+        fixture = self.fixture
+        fixture.publish()
+        with offline_github():
+            plan = rov_core.plan_library_update(fixture.board)
+
+        real_run_git = rov_core.run_git
+
+        def fail_checkout(repo_dir, *args, **kwargs):
+            if args[:1] == ("checkout",):
+                return completed(1, stderr="pathspec did not match")
+            return real_run_git(repo_dir, *args, **kwargs)
+
+        with offline_github(), mock.patch.object(rov_core, "run_git", fail_checkout):
+            result = rov_core.apply_library_update(
+                fixture.board, plan, UPDATE_BRANCH, COMMIT_MESSAGE, push=True
+            )
+
+        self.assertEqual(result.status, rov_core.STATUS_BLOCKED, result.message)
+        self.assertIn(UPDATE_BRANCH, result.message)
+        # Nothing was pushed, and the protected base branch is untouched.
+        self.assertNotIn(f"refs/heads/{UPDATE_BRANCH}", fixture.remote_heads())
+        self.assertEqual(fixture.submodule_head(), fixture.initial_library_commit)
+        self.assertEqual(fixture.head_subject(), "track the approved library remote")
+
+    def test_every_post_switch_blocked_result_carries_the_recovery_sentence(self):
+        """One fixed sentence, so CI and the CLI read the same contract."""
+        recovery = rov_core._update_branch_recovery(UPDATE_BRANCH, BASE_BRANCH)
+        self.assertIn(UPDATE_BRANCH, recovery)
+        self.assertIn(BASE_BRANCH, recovery)
+        self.assertIn(f"git switch {BASE_BRANCH}", recovery)
+
     def test_apply_stages_only_the_configured_library_path(self):
         """Only the configured submodule path is staged and committed."""
         fixture = self.fixture

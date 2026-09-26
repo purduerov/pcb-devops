@@ -62,6 +62,17 @@ PROBE_TIMEOUT_SECONDS = 20
 SCRIPT_TIMEOUT_SECONDS = 300
 KICAD_TIMEOUT_SECONDS = 900
 
+# The ERC/DRC severity policy for ``--full``, and it is the same policy
+# ``kibot_master.yaml`` declares for CI. KiCad's own preflight severity options
+# are ``--severity-all``, ``--severity-error``, and ``--severity-warning``;
+# ``kibot_master.yaml`` runs its preflight at ``severity: error``, so only real
+# errors violate here too. ``--severity-all`` would promote every ERC/DRC
+# warning to a failure and report a board as broken that CI accepts, which
+# makes a local ``--full`` pass a false negative. tests/test_rov.py asserts this
+# value against ``kibot_master.yaml`` and tests/test_workflow_contracts.py
+# asserts the CI side, so the local check and the shared gate cannot drift.
+KICAD_SEVERITY_FLAG = "--severity-error"
+
 _EXIT_CODE_BY_STATUS = {
     rov_core.STATUS_PASS: 0,
     rov_core.STATUS_WARN: 0,
@@ -79,10 +90,15 @@ class LibraryLoadError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def print_results(results: list[CheckResult]) -> None:
-    """Render every result as plain text with a status tag."""
+def print_results(results: list[CheckResult], stream=None) -> None:
+    """Render every result as plain text with a status tag.
+
+    ``stream`` defaults to standard output. The machine-readable commands pass
+    ``sys.stderr``, so the rows a caller pipes are the only thing on standard
+    output and a status line can never be mistaken for a part row.
+    """
     for result in results:
-        print(f"[{result.status}] {result.name}: {result.message}")
+        print(f"[{result.status}] {result.name}: {result.message}", file=stream)
 
 
 def print_library_update_markers(results: list[CheckResult]) -> None:
@@ -496,12 +512,16 @@ def _missing_design_file_message(name: str, project_file: Path | None) -> str:
 def _kicad_check(
     executable: str, name: str, subcommand: str, action: str, report: Path, target: Path
 ) -> CheckResult:
-    """Run one kicad-cli check and map its exit code to PASS, FAIL, or BLOCKED."""
+    """Run one kicad-cli check and map its exit code to PASS, FAIL, or BLOCKED.
+
+    ``KICAD_SEVERITY_FLAG`` is the single severity policy shared with
+    ``kibot_master.yaml``, so ``--full`` fails a board only where CI would.
+    """
     command = [
         executable,
         subcommand,
         action,
-        "--severity-all",
+        KICAD_SEVERITY_FLAG,
         "--exit-code-violations",
         "-o",
         str(report),
@@ -779,7 +799,9 @@ def run_library_sync(library_dir: Path, branch: str = rov_core.LIBRARY_BRANCH) -
 
     This command never pushes and never discards local work: a dirty work tree
     or an unreachable remote is BLOCKED, and an unreachable remote leaves the
-    cached revision in place and says so.
+    cached revision in place and says so. Both Git commands are bounded, so a
+    remote that accepts the connection and then stops answering is reported
+    rather than waited on forever.
     """
     library = Path(library_dir)
     if shutil.which("git") is None:
@@ -808,7 +830,11 @@ def run_library_sync(library_dir: Path, branch: str = rov_core.LIBRARY_BRANCH) -
             "them, then run this command again.",
         )
 
-    fetch = rov_core.run_git(library, "fetch", "origin", branch)
+    fetch = _bounded_library_git(
+        library, rov_core.LIBRARY_FETCH_TIMEOUT_SECONDS, "fetch", "origin", branch
+    )
+    if isinstance(fetch, CheckResult):
+        return fetch
     if fetch.returncode != 0:
         detail = _last_line(fetch.stderr) or _last_line(fetch.stdout) or "unknown error"
         return CheckResult(
@@ -817,7 +843,11 @@ def run_library_sync(library_dir: Path, branch: str = rov_core.LIBRARY_BRANCH) -
             f"Could not reach origin/{branch} ({detail}); the cached library revision "
             "was kept and it may be stale.",
         )
-    merge = rov_core.run_git(library, "merge", "--ff-only", f"origin/{branch}")
+    merge = _bounded_library_git(
+        library, rov_core.GIT_MERGE_TIMEOUT_SECONDS, "merge", "--ff-only", f"origin/{branch}"
+    )
+    if isinstance(merge, CheckResult):
+        return merge
     if merge.returncode != 0:
         detail = _last_line(merge.stderr) or _last_line(merge.stdout) or "unknown error"
         return CheckResult(
@@ -837,6 +867,27 @@ def run_library_sync(library_dir: Path, branch: str = rov_core.LIBRARY_BRANCH) -
         rov_core.STATUS_PASS,
         f"Fast-forwarded the library to origin/{branch}.",
     )
+
+
+def _bounded_library_git(
+    library: Path, timeout: float, *args: str
+) -> "subprocess.CompletedProcess[str] | CheckResult":
+    """Run one library Git command with a hard time limit.
+
+    Returns the completed process, or a BLOCKED result naming the limit when the
+    command outlives ``timeout``. A sync that hangs on an unresponsive remote is
+    reported the same way as one that fails outright, and the cached revision is
+    left in place either way.
+    """
+    try:
+        return rov_core.run_git(library, *args, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "library-sync",
+            rov_core.STATUS_BLOCKED,
+            f"git {' '.join(args)} did not finish within {timeout} seconds and was "
+            "stopped; the cached library revision was kept and it may be stale.",
+        )
 
 
 def run_library_list(library_dir: Path, query: str | None = None) -> list[CheckResult]:
@@ -1244,7 +1295,10 @@ def _cmd_library_rows(args: argparse.Namespace, query: str | None) -> int:
         results = run_library_list(_library_dir(args), query)
     except LibraryLoadError as exc:
         results = [CheckResult("library-list", rov_core.STATUS_BLOCKED, str(exc))]
-    print_results(results)
+    # The status summary goes to standard error, so standard output stays a clean
+    # tab-separated table and `rov library list | column -t` or a script reading
+    # the rows never has to filter out a `[PASS] library-list:` line.
+    print_results(results, stream=sys.stderr)
     return exit_code_for(results)
 
 
