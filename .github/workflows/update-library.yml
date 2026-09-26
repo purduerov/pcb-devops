@@ -68,7 +68,11 @@ jobs:
         with:
           repository: purduerov/pcb-devops
           ref: ${{ inputs.platform-ref }}
-          path: pcb-devops-tools
+          # Outside the board working tree on purpose. Checked out inside it, the
+          # tools are an untracked change in the board repository, and the CLI
+          # refuses to update a board that has uncommitted changes, so the
+          # workflow would block its own update on every run.
+          path: ${{ runner.temp }}/pcb-devops
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -140,7 +144,7 @@ jobs:
           # update branch, pushes only that branch, and then runs
           # `gh pr create` for it. A FAIL or BLOCKED state stops this step.
           UPDATE_STATUS=0
-          PR_OUTPUT=$(python pcb-devops-tools/scripts/rov.py board sync-library \
+          PR_OUTPUT=$(python "${{ runner.temp }}/pcb-devops/scripts/rov.py" board sync-library \
             --project-dir . \
             --library-path "${{ inputs.library-path }}" \
             --library-branch "${{ inputs.library-branch }}" \
