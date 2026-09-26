@@ -1418,7 +1418,13 @@ class TestShellLauncherControlFlow(unittest.TestCase):
                     )
                     output = combined_output(result)
                 self.assertEqual(result.returncode, expected, output)
-                self.assertIn("No .kicad_pro project file found", output)
+                self.assertIn(
+                    "No .kicad_pro project file found",
+                    output,
+                    f"DIAG shell={shell!r} args={result.args!r} rc={result.returncode} "
+                    f"stdout={result.stdout!r} stderr={result.stderr!r} "
+                    f"board={str(board)!r} script_exists={(board / 'LAUNCH_KICAD.sh').exists()}",
+                )
 
 
 class TestCollectionIntegrity(unittest.TestCase):
