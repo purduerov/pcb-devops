@@ -103,7 +103,12 @@ for. Requiring it would make these parts permanently unimportable.
 ## Architecture and components
 
 - `KiCad/Libraries/scripts/import_part.py` remains the only import path. Promotion uses
-  its existing non-interactive flags; no new import code is introduced.
+  its existing non-interactive flags. One gap is closed first: the script appends only to
+  the aggregate `Symbols/rov_<category>.kicad_sym`, while `build_symbol_libs.py` compiles
+  `Symbols/parts/<category>/*.kicad_sym` and overwrites that aggregate. A part imported
+  through the CLI alone is therefore destroyed by the next build. The script gains a
+  per-part writer matching the one the GUI already performs, so both import paths are
+  rebuild-safe.
 - `KiCad/Libraries/scripts/kicad_sym_utils.py` remains the parser and the single
   definition of the contract field list.
 - `KiCad/Libraries/scripts/rov_bridge.py` remains the only seam to the DevOps CLI.
@@ -143,7 +148,7 @@ where one exists on disk.
 | `AZ1117IH-3.3TRG1` | power | `X19-Electrical-New-Member-Board/libs/temporary_New_member_lib.kicad_sym` | none on disk |
 | `IRS-5_10-Q12P-C` | power | `X19-Electrical-New-Member-Board/libs/temporary_New_member_lib.kicad_sym` | none assigned |
 | `E48SC12030NRFH` | power | `X19-Power-Slab-Board/DigikeyParts/E48SC12030NRFH/...` | `E48SC12030NRFH` |
-| `USB4220-03-1040-C_REVA` | connectors | `X19-Float-Board/CustomComponents/USB4220-03-1040-C_REVA.kicad_sym` | `GCT_USB4220-03-1040-C_REVA` |
+| `USB4220-03-1040-C` | connectors | `X19-Float-Board/CustomComponents/USB4220-03-1040-C_REVA.kicad_sym` | `GCT_USB4220-03-1040-C_REVA` |
 | `UJ20-C-H-G-SMT-1-P16-TR` | connectors | `X19-Electrical-New-Member-Board/libs/temporary_New_member_lib.kicad_sym` | none on disk |
 | `ESD2CAN24DBZRQ1` | connectors | `X19-Control-Board/part_files/board_control_manual_lib.kicad_sym` | none on disk |
 | `TYPE-C-31-M-12` | connectors | `X19-Electrical-New-Member-Board/libs/temporary_New_member_lib.kicad_sym` | none assigned |
@@ -153,9 +158,23 @@ where one exists on disk.
 | `STM32G431RBT6` | logic | `X19-Float-Board/CustomComponents/old_STM32G431RBT6.kicad_sym` | none assigned |
 
 Each promoted symbol carries `MPN`, `Manufacturer`, `Datasheet`, `Temp_Range`, and
-`Category`. `Manufacturer`, `MPN`, and `Datasheet` are resolved from manufacturer
-sources; `Temp_Range` and `Category` follow the conventions already used by the existing
-20 parts.
+`Category`. `Manufacturer`, `MPN`, and `Datasheet` are resolved from manufacturer sources;
+`Temp_Range` and `Category` follow the conventions already used by the existing 20 parts.
+Four parts already carry the full contract set in their source symbol and are imported
+without any value being typed by hand.
+
+`Datasheet` is a real, resolving URL. The manufacturer's own site is preferred, but two
+of the twelve are reachable only as the manufacturer's document on a distributor mirror
+(the Delta `E48SC12030` datasheet and the GCT `USB4220` product specification), and the
+Adafruit module has a product page rather than a datasheet. The document is named in the
+commit message so a reviewer can find and check it. A guessed URL is not acceptable, since
+an unresolvable datasheet link is worse than a visibly absent one.
+
+Two parts are renamed on import because the board's symbol name does not match the
+orderable part. `USB4220-03-1040-C_REVA` carries `REVA`, a mechanical board revision
+rather than part of GCT's MPN, so it is imported as `USB4220-03-1040-C`. `rfm95adafruitmodule`
+is an Adafruit breakout with no manufacturer part number, so it keeps its name and its
+`MPN` field stays empty.
 
 A part whose footprint file does not exist is imported with an empty `Footprint` and a
 `PENDING` note in its description, rather than with a reference that cannot resolve.
@@ -168,10 +187,19 @@ a file that no longer resolves after cleanup, not a design change.
 ### Distinct MPNs are never merged
 
 `TCAN1044VDRQ1` (referenced by the boards) and `TCAN1044AVDRQ1` (already shared) are
-different manufacturer part numbers, as are `SMCJ58A` and `SMBJ58A-TR`. Merging them
-would be an electrical substitution decision. Each is kept as its own part, and each
-board keeps whichever MPN it already specifies. Choosing between two MPNs is a hardware
-decision for the board owner, not a library decision.
+different manufacturer part numbers, as are `SMCJ58A` and `SMBJ58A-TR`. `TCAN1044VDRQ1` is
+TI's `TCAN1044V-Q1` and `TCAN1044AVDRQ1` is `TCAN1044AV-Q1`; the two have different I/O
+voltage ranges and are not interchangeable. Merging them would be an electrical
+substitution decision. Each is kept as its own part, and each board keeps whichever MPN it
+already specifies. Choosing between two MPNs is a hardware decision for the board owner,
+not a library decision.
+
+The required field set is defined in five places, not one: `import_part.py`,
+`kicad_sym_utils.py`, `library_manager_gui.py`, and a `linter_validator.py` in each of
+`KiCad/Libraries` and `KiCad/DevOps`. The two linter copies are not identical, and
+`rov.py` prefers the library's copy while falling back to the DevOps one, so a repo
+without its own linter would enforce a different contract than one that has it. All five
+definitions change together.
 
 ## Board rewrite transform
 
