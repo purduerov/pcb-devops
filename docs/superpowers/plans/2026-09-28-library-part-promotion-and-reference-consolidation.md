@@ -188,7 +188,7 @@ to:
         self.assertTrue(any("Missing mandatory field: 'Temp_Range'" in e for e in errors))
 ```
 
-adjusting the fixture so `Temp_Range` is the field actually absent.
+adjusting the fixture so `Temp_Range` is the field actually absent. Do not add a second assertion after `assertEqual(len(errors), 0)` claiming to check for a `DigiKey` error: with `errors` already asserted empty, such an assertion can never fail and reads as coverage that does not exist. The `DigiKey_SKU` alias test is the specific trap here — in `test_digikey_sku_alias` leave the fixture alone and rename the test to what it actually checks, a symbol carrying an extra `DigiKey_SKU` property still lints clean.
 
 - [ ] **Step 6: Mark the field optional in the GUI form**
 
@@ -213,6 +213,8 @@ In `KiCad/Libraries/CONTRIBUTING.md` and `KiCad/Libraries/README.md`, find every
 ```
 MPN, Manufacturer, Datasheet, Temp_Range, Category
 ```
+
+In `KiCad/DevOps/README.md` the bullet describing `linter_validator.py` also lists the required fields and must change with the rest, so the documented contract cannot drift from the enforced one anywhere in either repository.
 
 Where the text explains why a field is required, keep the explanation for the five and add one line stating that `DigiKey` is optional because it is one distributor's SKU and a part is not required to be stocked there.
 
@@ -738,7 +740,100 @@ in the shared library is not a claim that either board uses them."
 
 ---
 
-### Task 6: Build the reference consolidation transform
+### Task 5a: Bump the library submodule on every board
+
+Every board and `board-template` vendors its own copy of `linter_validator.py` through the
+`libs/purdue-rov-kicad-lib` submodule, and all nine still require `DigiKey`. `rov.py`'s
+`_resolve_linter` checks the library's own copy before the DevOps fallback, so board
+validation enforces the old contract. The parts promoted in Tasks 3 to 5 carry an empty
+`DigiKey` and would fail board validation until the submodule points at a library commit
+containing the Task 1 change. This task must run before any board schematic is rewritten.
+
+**Files:**
+- Modify: the `libs/purdue-rov-kicad-lib` gitlink in all eight boards and `board-template`
+
+**Interfaces:**
+- Consumes: the library master produced by Tasks 1 to 5.
+- Produces: every board validating against the new five-field contract. Tasks 7 to 10 depend
+  on this, because board CI is the gate for their commits.
+
+- [ ] **Step 1: Push the library**
+
+```bash
+git -C ../Libraries push origin master
+```
+
+Expected: fast-forward, no force.
+
+- [ ] **Step 2: Update and push the submodule on each repository**
+
+Run once per repository, substituting the path:
+
+```powershell
+$lib = "C:\Users\aman\Documents\Engineering\ROV\KiCad\Libraries"
+$repos = @(Get-Item "C:\Users\aman\Documents\Engineering\ROV\KiCad\Board_Template")
+$repos += Get-ChildItem "C:\Users\aman\Documents\Engineering\ROV\KiCad\Boards" -Directory
+foreach ($r in $repos) {
+  $sub = Join-Path $r.FullName "libs\purdue-rov-kicad-lib"
+  git -C $lib fetch origin 2>&1 | Out-Null
+  git -C $sub fetch origin 2>&1 | Out-Null
+  git -C $sub checkout master 2>&1 | Select-Object -Last 1
+  git -C $sub pull --ff-only origin master 2>&1 | Select-Object -Last 1
+  Write-Output ("{0,-34} {1}" -f $r.Name, (git -C $sub rev-parse --short HEAD))
+}
+```
+
+- [ ] **Step 3: Confirm the vendored linter now has five fields**
+
+`board-template` vendors the same submodule as the eight boards, so all nine are checked:
+
+```powershell
+$repos = @(Get-Item "C:\Users\aman\Documents\Engineering\ROV\KiCad\Board_Template")
+$repos += Get-ChildItem "C:\Users\aman\Documents\Engineering\ROV\KiCad\Boards" -Directory
+foreach ($r in $repos) {
+  $f = Join-Path $r.FullName "libs\purdue-rov-kicad-lib\scripts\linter_validator.py"
+  $has = (Select-String -Path $f -Pattern 'MANDATORY_FIELDS = .*DigiKey' -Quiet)
+  Write-Output ("{0,-34} {1}" -f $r.Name, $(if ($has) { "STILL REQUIRES DigiKey" } else { "ok" }))
+}
+```
+
+Expected: `ok` for all nine. If any repository still requires `DigiKey`, its submodule did
+not advance; fix that repository before continuing.
+
+- [ ] **Step 4: Commit the gitlink on each board**
+
+Use an explicit pathspec. Four boards carry a pre-existing unrelated modification and
+`git add -A` would sweep it in.
+
+```bash
+git -C ../Boards/X19-Control-Board add libs/purdue-rov-kicad-lib
+git -C ../Boards/X19-Control-Board commit -m "chore(library): bump the component library submodule
+
+Brings the board onto the five-field metadata contract. The vendored
+linter_validator.py still required a DigiKey SKU, which cannot be
+derived from an MPN without DigiKey's product API, so every part the
+library gained was unvalidatable here."
+git -C ../Boards/X19-Control-Board push origin master
+```
+
+Repeat for the remaining seven boards and for `board-template`, using each repository's own
+name in the commit message. Do not stage anything else in those repositories.
+
+- [ ] **Step 5: Verify the updater reports no change**
+
+```bash
+gh workflow run auto-update-submodule.yml --repo purduerov/board-template --ref master
+```
+
+Expected within a few minutes: a green run reporting `NO_CHANGE`, because the submodule now
+already records the approved library revision. A run reporting `BLOCKED` means a stale
+update branch still exists; report it rather than force-pushing.
+
+- [ ] **Step 6: Record the outcome**
+
+Append one line to the ledger naming each board's resulting submodule commit, so Task 12's
+audit can confirm all nine repositories are on the same library revision.
+
 
 **Files:**
 - Create: `KiCad/DevOps/scripts/consolidate_symbol_refs.py`
