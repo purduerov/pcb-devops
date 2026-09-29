@@ -666,12 +666,31 @@ Verified metadata for the parts in this task. Every datasheet value below was co
 | --- | --- | --- | --- |
 | `TPS561208DDCR` | Texas Instruments | `https://www.ti.com/lit/ds/symlink/tps561208.pdf` | `-40°C to 125°C` |
 | `E48SC12030NRFH` | Delta Electronics | `https://resources.ampheo.com/static/datasheets/delta-electronics/e48sc12030nrfh.pdf` | `-40°C to 85°C` |
-| `AZ1117IH-3.3TRG1` | already in the symbol | already in the symbol | already in the symbol |
-| `IRS-5_10-Q12P-C` | already in the symbol | already in the symbol | already in the symbol |
+| `AZ1117IH-3.3TRG1` | Diodes Incorporated | `https://www.diodes.com/assets/Datasheets/AZ1117I.pdf` | `-40°C to 125°C` |
+| `IRS-5_10-Q12P-C` | Diodes Incorporated | repair required, see below | `-40°C to 85°C` |
+
+Both of these values are already present in the source symbol, but they sit nested inside a
+malformed `(property "Value" ...)` expression, so they are not readable as symbol properties.
+Read them off the nested text and pass them explicitly rather than researching substitutes; the
+metadata is the teammate's, not yours. The `-40°C to 85°C` range for `IRS-5_10-Q12P-C` is the
+correction: passing no `--temp` makes argparse write its `-40°C to 125°C` default, which is
+wrong and which nothing flags.
+
+**The source file is structurally malformed and must be repaired in a temp copy.**
+`temporary_New_member_lib.kicad_sym` has a `Value` property whose `(effects (font (size ...))`
+is missing a closing paren, so the five contract properties are swallowed inside it, and the
+`Footprint` references `SOT223_AZ1117I_6P5X3P5_DIO` and `IRS510Q12PC` name files that exist
+nowhere in the workspace. Repair the paren in the temp copy so the properties become direct
+children, and drop the dangling `Footprint` value so it is empty rather than unresolvable. Do
+not modify the board repository: its file is a teammate-authored scratch library that Task 11
+deletes, and repairing it in place would buy nothing.
+
+The same file also holds `TYPE-C-31-M-12` and `UJ20-C-H-G-SMT-1-P16-TR`, so Task 4 needs the
+same repair. Do it once here and reuse the repaired file for Task 4.
 
 The `E48SC12030NRFH` datasheet is Delta's own `E48SC12030 360W 1/8 Brick DC/DC Power Modules` document, reachable only through a distributor mirror; Delta's product page did not resolve. Name the document in the commit message so a reviewer can find it.
 
-`AZ1117IH-3.3TRG1` and `IRS-5_10-Q12P-C` already carry `MPN`, `Manufacturer`, `Datasheet`, `Temp_Range`, and `Category` in the source symbol, so no lookup is needed and no value should be typed by hand.
+`AZ1117IH-3.3TRG1` and `IRS-5_10-Q12P-C` are not looked up: their manufacturer, datasheet, and DigiKey values are already in the source, nested inside the malformed `Value` expression. Read them from there so the metadata stays the teammate's own rather than a substitute you researched.
 
 - [ ] **Step 2: Import `TPS561208DDCR` with its footprint**
 
