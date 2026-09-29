@@ -229,8 +229,10 @@ Shared platform:
 
 Validation and artifacts:
 
-- `linter_validator.py`: checks `.kicad_sym` files for the six required fields
-  (`Category`, `MPN`, `Manufacturer`, `Datasheet`, `Temp_Range`, `DigiKey`).
+- `linter_validator.py`: checks `.kicad_sym` files for the five required fields
+  (`Category`, `MPN`, `Manufacturer`, `Datasheet`, `Temp_Range`). `DigiKey` is
+  optional: it is one distributor's SKU, and a part is not required to be stocked
+  there, so the linter never requires it.
 - `sync_project_libs.py`: writes the standard library table entries into a
   board's `sym-lib-table`, `fp-lib-table`, and `.gitmodules`, preserving custom
   entries. Takes an optional board directory argument.

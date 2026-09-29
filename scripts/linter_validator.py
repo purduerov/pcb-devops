@@ -6,7 +6,7 @@ import urllib.parse
 import glob
 
 # Mandatory fields that must be present in every component symbol
-MANDATORY_FIELDS = {"MPN", "Manufacturer", "Datasheet", "Temp_Range", "DigiKey", "Category"}
+MANDATORY_FIELDS = {"MPN", "Manufacturer", "Datasheet", "Temp_Range", "Category"}
 
 ALLOWED_CATEGORIES = {"Passives", "Power", "Logic", "Connectors", "Sensors", "Mech"}
 
@@ -108,10 +108,10 @@ if __name__ == "__main__":
         all_errors.extend(check_kicad_symbol_file(symbols_file))
         
     if all_errors:
-        print("\n❌ Linter Verification Failed:", file=sys.stderr)
+        print("\n[ERROR] Linter Verification Failed:", file=sys.stderr)
         for err in all_errors:
             print(f" - {err}", file=sys.stderr)
         sys.exit(1)
         
-    print("\n✅ Library verified. All components compliant with structural guidelines.")
+    print("\n[OK] Library verified. All components compliant with structural guidelines.")
     sys.exit(0)

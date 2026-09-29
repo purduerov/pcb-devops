@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
 from linter_validator import check_kicad_symbol_file
@@ -44,17 +45,23 @@ class TestLinterValidator(unittest.TestCase):
   (symbol "TestSymbol"
     (property "MPN" "12345")
     (property "Manufacturer" "TestCorp")
-    (property "Datasheet" "https://example.com/data.pdf")
     (property "Temp_Range" "-40 to 85")
+    (property "DigiKey" "123-456-ND")
     (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
         errors = check_kicad_symbol_file(filepath)
         self.assertEqual(len(errors), 1)
-        self.assertIn("missing mandatory field: DigiKey", errors[0])
+        self.assertIn("missing mandatory field: Datasheet", errors[0])
 
-    def test_digikey_sku_alias(self):
+    def test_digikey_sku_property_lints_clean(self):
+        # A DigiKey_SKU property is still accepted alongside the other required
+        # fields. The linter's DigiKey_SKU -> DigiKey alias branch is currently
+        # unobservable, because the branch only ever feeds the mandatory-field
+        # check and DigiKey is no longer mandatory; the branch is kept so the
+        # alias stays supported if DigiKey ever becomes required again. This test
+        # therefore does not cover that branch.
         content = """(kicad_symbol_lib
   (symbol "TestSymbol"
     (property "MPN" "12345")
@@ -68,6 +75,26 @@ class TestLinterValidator(unittest.TestCase):
         filepath = self.create_temp_file(content)
         errors = check_kicad_symbol_file(filepath)
         self.assertEqual(len(errors), 0)
+
+    def test_digikey_is_not_mandatory(self):
+        """DigiKey is optional: MPN plus Manufacturer is the part's identity."""
+        symbol = (
+            '(kicad_symbol_lib (version 20211014)\n'
+            '  (symbol "TESTPART" (in_bom yes) (on_board yes)\n'
+            '    (property "MPN" "TESTPART-1" (id 0) (at 0 0 0))\n'
+            '    (property "Manufacturer" "Acme" (id 1) (at 0 0 0))\n'
+            '    (property "Datasheet" "https://example.com/t.pdf" (id 2) (at 0 0 0))\n'
+            '    (property "Temp_Range" "-40C to 125C" (id 3) (at 0 0 0))\n'
+            '    (property "Category" "Power" (id 4) (at 0 0 0))\n'
+            '  )\n'
+            ')\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".kicad_sym", delete=False) as fh:
+            fh.write(symbol)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        errors = check_kicad_symbol_file(Path(path))
+        self.assertEqual(errors, [], f"unexpected errors: {errors}")
 
     def test_invalid_datasheet_url_format(self):
         content = """(kicad_symbol_lib
@@ -117,15 +144,15 @@ class TestLinterValidator(unittest.TestCase):
     (property "MPN" "12345")
     (property "Manufacturer" "TestCorp")
     (property "Datasheet" "https://example.com/data.pdf")
-    (property "Temp_Range" "-40 to 85")
-    (property "DigiKey" "   ")
+    (property "Temp_Range" "   ")
+    (property "DigiKey" "123-456-ND")
     (property "Category" "Passives")
   )
 )"""
         filepath = self.create_temp_file(content)
         errors = check_kicad_symbol_file(filepath)
         self.assertEqual(len(errors), 1)
-        self.assertIn("missing mandatory field: DigiKey", errors[0])
+        self.assertIn("missing mandatory field: Temp_Range", errors[0])
 
     def test_invalid_category(self):
         content = """(kicad_symbol_lib
