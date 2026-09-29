@@ -281,60 +281,76 @@ class TestPerPartSourceFile(unittest.TestCase):
 
     def test_imported_symbol_survives_rebuild(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            lib = Path(tmpdir)
-            scripts = lib / "scripts"
-            scripts.mkdir()
-            (lib / "Symbols" / "parts").mkdir(parents=True)
-            for name in ("import_part", "kicad_sym_utils", "build_symbol_libs"):
-                shutil.copy2(BASE_DIR / "scripts" / f"{name}.py", scripts / f"{name}.py")
-            (lib / "Symbols" / "rov_power.kicad_sym").write_text(
-                '(kicad_symbol_lib (version 20211014)\n  (generator "kicad_symbol_editor")\n)\n',
-                encoding="utf-8",
-            )
-            source = Path(tmpdir) / "part.kicad_sym"
-            source.write_text(
-                '(kicad_symbol_lib (version 20211014)\n'
-                '  (symbol "REBUILDPROBE" (in_bom yes) (on_board yes)\n'
-                '    (property "Reference" "U" (id 0) (at 0 0 0))\n'
-                '  )\n'
-                ')\n',
-                encoding="utf-8",
-            )
-            env = dict(os.environ, PYTHONPATH=str(scripts))
-            result = subprocess.run(
-                [sys.executable, str(scripts / "import_part.py"),
-                 "--symbol", str(source), "--category", "Power",
-                 "--mpn", "REBUILDPROBE", "--mfr", "Acme",
-                 "--datasheet", "https://example.com/p.pdf",
-                 "--temp", "-40C to 125C"],
-                capture_output=True, text=True, env=env, cwd=tmpdir,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            lib, scripts = self._stage_library(Path(tmpdir))
+            source = Path(tmpdir) / "REBUILDPROBE.kicad_sym"
+            self._write_source_symbol(source, "REBUILDPROBE")
+            self.assertEqual(
+                self._run_import(scripts, [
+                    "--symbol", str(source), "--category", "Power",
+                    "--mpn", "REBUILDPROBE", "--mfr", "Acme",
+                    "--datasheet", "https://example.com/p.pdf",
+                    "--temp", "-40C to 125C",
+                ]).returncode, 0)
             per_part = lib / "Symbols" / "parts" / "power" / "REBUILDPROBE.kicad_sym"
             self.assertTrue(per_part.is_file(), "per-part source file was not written")
-
-            rebuild = subprocess.run(
-                [sys.executable, str(scripts / "build_symbol_libs.py")],
-                capture_output=True, text=True, env=env, cwd=tmpdir,
-            )
-            self.assertEqual(rebuild.returncode, 0, rebuild.stderr)
-            aggregate = (lib / "Symbols" / "rov_power.kicad_sym").read_text(encoding="utf-8")
-            self.assertIn('(symbol "REBUILDPROBE"', aggregate,
-                          "rebuild discarded the imported symbol")
+            self._assert_rebuild_keeps_part(scripts, lib, "REBUILDPROBE")
 ```
+
+Three details this test needs, none of which are obvious from the test body. `import_part.py`
+does a module-level `import rov_bridge`, so `rov_bridge.py` must be in the copied script set
+or the subprocess dies with `ModuleNotFoundError` before doing anything. `run_shared_validation()`
+exits 1 when no DevOps checkout resolves, so the staged tree needs a stub `DevOps/scripts/rov.py`
+and `ROV_DEVOPS_DIR` pointing at it, or the return-code assertion fires before the real one.
+And `TestSharedValidation.test_interactive_import_prints_failing_validation_output` calls
+`interactive_mode()` in-process against the real library, so it must patch
+`write_part_source_file` the way it already patches `append_symbol_to_category`, or the new
+write drops a stray per-part file into the repository.
+
+Cover the wizard path too, so a regression removing `interactive_mode()`'s per-part write is
+caught. Drive it by invoking the script with no CLI arguments, which is what selects the
+wizard, and pipe one answer per prompt in the order `interactive_mode()` asks them. Select the
+category by its computed menu number rather than by pressing Enter, so an added prompt
+surfaces as `EOFError` in the assertion message instead of being silently absorbed:
+
+```python
+    def test_wizard_import_survives_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lib, scripts = self._stage_library(Path(tmpdir))
+            source = Path(tmpdir) / "WIZARDPROBE.kicad_sym"
+            self._write_source_symbol(source, "WIZARDPROBE")
+            answers = "\n".join([
+                str(source),   # symbol path
+                "",            # 3D model path, none
+                "",            # detected category default
+                "WIZARDPROBE", # MPN
+                "Acme",        # manufacturer
+                "https://example.com/w.pdf",
+                "-40C to 125C",
+                "https://www.digikey.com/en/products?keywords=WIZARDPROBE",
+                "",            # high current
+            ]) + "\n"
+            result = self._run_import(scripts, [], stdin=answers)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            per_part = lib / "Symbols" / "parts" / "power" / "WIZARDPROBE.kicad_sym"
+            self.assertTrue(per_part.is_file(), "per-part source file was not written")
+            self._assert_rebuild_keeps_part(scripts, lib, "WIZARDPROBE")
+```
+
+Verify the wizard test by mutation before committing: delete the
+`write_part_source_file` call from `interactive_mode()`, confirm the wizard test fails with
+`per-part source file was not written` while `test_imported_symbol_survives_rebuild` still
+passes, then restore. Two tests that both guard only one path is the failure mode here.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python -m unittest tests.test_library_manager.TestPerPartSourceFile -v`
 Expected: FAIL, `per-part source file was not written` is `False`.
 
-- [ ] **Step 3: Add the per-part writer**
+- [ ] **Step 3: Write the per-part writer**
 
-In `KiCad/Libraries/scripts/import_part.py`, immediately after `copy_footprint_to_category` (which ends at line 155), add:
+In `KiCad/Libraries/scripts/import_part.py`, add `PARTS_DIR` to the path-constant block at lines 56-58 beside `SYMBOLS_DIR` and `FOOTPRINTS_DIR`, not beside the function that uses it, and add the writer after `copy_footprint_to_category`:
 
 ```python
-PARTS_DIR = SYMBOLS_DIR / "parts"
-
 def write_part_source_file(cat, sym_block):
     """Write the per-part source file that build_symbol_libs.py compiles from.
 
@@ -358,7 +374,12 @@ def write_part_source_file(cat, sym_block):
     return part_file
 ```
 
-- [ ] **Step 4: Call it from main()**
+- [ ] **Step 4: Call it from both entry points**
+
+`import_part.py` has two entry points and both need the call. `main()` handles the
+argument-driven path; `interactive_mode()` is the default invocation, since `main()` routes
+there whenever `--symbol` is absent, and the module docstring documents bare
+`python scripts/import_part.py` as the primary usage.
 
 In `main()`, replace:
 
@@ -375,7 +396,13 @@ with:
     append_symbol_to_category(category, updated_sym)
 ```
 
-The rename to the MPN happens earlier at the `rename_symbol` call, so the per-part file is named after the MPN, matching the convention the existing 20 parts already follow.
+In `interactive_mode()`, add the same call immediately before that function's
+`append_symbol_to_category(category, updated_sym)`, placed **after** the if/else that binds
+`updated_sym`, so the Passives branch is covered too. A call placed before the if/else raises
+`NameError` on the Passives path.
+
+The rename to the MPN happens earlier at the `rename_symbol` call, so the per-part file is
+named after the MPN, matching the convention the existing 20 parts already follow.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
