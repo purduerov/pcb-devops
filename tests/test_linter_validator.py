@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 
+DEVOPS_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
 from linter_validator import check_kicad_symbol_file
 
@@ -217,6 +218,51 @@ class TestLinterValidator(unittest.TestCase):
         # Should only report missing field, not format error or not-a-pdf error
         self.assertEqual(len(errors), 1)
         self.assertIn("missing mandatory field: Datasheet", errors[0])
+
+    def test_nested_property_does_not_satisfy_the_contract(self):
+        """A property swallowed by a malformed sibling is not a symbol property.
+
+        The Electrical board's scratch library has a Value property missing a
+        closing paren, which swallows the five contract properties inside it.
+        A line-based scan counts them and reports the symbol compliant.
+        """
+        symbol = (
+            '(kicad_symbol_lib (version 20211014)\n'
+            '  (symbol "NESTEDPROBE" (in_bom yes) (on_board yes)\n'
+            '    (property "Reference" "U" (id 0) (at 0 0 0))\n'
+            '    (property "Value" "NESTEDPROBE"\n'
+            '      (at 0 0 0)\n'
+            '      (effects\n'
+            '        (font\n'
+            '          (size 1.524 1.524)\n'
+            '        )\n'
+            '    (property "MPN" "NESTEDPROBE" (id 1) (at 0 0 0))\n'
+            '    (property "Manufacturer" "Acme" (id 2) (at 0 0 0))\n'
+            '    (property "Datasheet" "https://example.com/n.pdf" (id 3) (at 0 0 0))\n'
+            '    (property "Temp_Range" "-40C to 125C" (id 4) (at 0 0 0))\n'
+            '    (property "Category" "Power" (id 5) (at 0 0 0))\n'
+            '      )\n'
+            '    )\n'
+            '  )\n'
+            ')\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".kicad_sym", delete=False) as fh:
+            fh.write(symbol)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        errors = check_kicad_symbol_file(Path(path))
+        self.assertTrue(
+            any("missing mandatory field" in error for error in errors),
+            f"malformed nesting was not detected: {errors}",
+        )
+
+    def test_electrical_scratch_library_is_rejected(self):
+        source = (DEVOPS_DIR.parent / "Boards" / "X19-Electrical-New-Member-Board"
+                  / "libs" / "temporary_New_member_lib.kicad_sym")
+        if not source.is_file():
+            self.skipTest("Electrical board scratch library is not present")
+        errors = check_kicad_symbol_file(source)
+        self.assertTrue(errors, "the known-corrupt file must not lint clean")
 
 if __name__ == '__main__':
     unittest.main()
