@@ -430,7 +430,222 @@ then rebuilds to prove the part survives."
 
 ---
 
-### Task 3: Promote the power parts
+### Task 2b: Make the linter's field detection structural
+
+`linter_validator.py` scans a symbol file line by line with a regex, so it counts a
+`(property "...")` line wherever it appears, including one accidentally nested inside a
+malformed sibling. A corrupt file therefore produces a false `[OK]`: a symbol with no
+`Manufacturer` and no `Datasheet` passes the platform's only contract gate. Fix the gate before
+importing any more parts, or every later import inherits the same blind spot.
+
+**Files:**
+- Modify: `KiCad/DevOps/scripts/linter_validator.py` — `check_kicad_symbol_file`
+- Modify: `KiCad/Libraries/scripts/linter_validator.py` — same function
+- Test: `KiCad/DevOps/tests/test_linter_validator.py`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces: the same `check_kicad_symbol_file(filepath) -> list[str]` signature, unchanged, in
+  both copies. Both copies must stay behaviorally identical on this point, because `rov.py`
+  picks one at runtime.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `KiCad/DevOps/tests/test_linter_validator.py`:
+
+```python
+    def test_nested_property_does_not_satisfy_the_contract(self):
+        """A property swallowed by a malformed sibling is not a symbol property.
+
+        The Electrical board's scratch library has a Value property missing a
+        closing paren, which swallows the five contract properties inside it.
+        A line-based scan counts them and reports the symbol compliant.
+        """
+        symbol = (
+            '(kicad_symbol_lib (version 20211014)\n'
+            '  (symbol "NESTEDPROBE" (in_bom yes) (on_board yes)\n'
+            '    (property "Reference" "U" (id 0) (at 0 0 0))\n'
+            '    (property "Value" "NESTEDPROBE"\n'
+            '      (at 0 0 0)\n'
+            '      (effects\n'
+            '        (font\n'
+            '          (size 1.524 1.524)\n'
+            '        )\n'
+            '    (property "MPN" "NESTEDPROBE" (id 1) (at 0 0 0))\n'
+            '    (property "Manufacturer" "Acme" (id 2) (at 0 0 0))\n'
+            '    (property "Datasheet" "https://example.com/n.pdf" (id 3) (at 0 0 0))\n'
+            '    (property "Temp_Range" "-40C to 125C" (id 4) (at 0 0 0))\n'
+            '    (property "Category" "Power" (id 5) (at 0 0 0))\n'
+            '      )\n'
+            '    )\n'
+            '  )\n'
+            ')\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".kicad_sym", delete=False) as fh:
+            fh.write(symbol)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        errors = check_kicad_symbol_file(Path(path))
+        self.assertTrue(
+            any("missing mandatory field" in error for error in errors),
+            f"malformed nesting was not detected: {errors}",
+        )
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `python -m unittest tests.test_linter_validator.TestLinterValidator.test_nested_property_does_not_satisfy_the_contract -v`
+Expected: FAIL, because the current line-based scan finds all five fields and returns no
+errors.
+
+- [ ] **Step 3: Parse properties structurally instead of by line**
+
+In both copies of `linter_validator.py`, replace the line-scanning body of
+`check_kicad_symbol_file` with a block walk that collects only properties which are DIRECT
+children of a top-level symbol. Reuse the balanced-parenthesis walk the plan already specifies
+for the consolidation tool: track depth, ignore parentheses inside quoted strings, and treat a
+backslash as escaping the next character.
+
+```python
+def _top_level_symbols(text):
+    """Yield (name, body) for each top-level symbol, skipping unit sub-symbols."""
+    for match in re.finditer(r'^  \(symbol "([^"]+)"', text, re.M):
+        name = match.group(1)
+        if SUB_SYM_PATTERN.search(name):
+            continue
+        start = match.start() + 2
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    yield name, text[start:index + 1]
+                    break
+
+
+def _direct_properties(block):
+    """Return {name: value} for properties that are direct children of a symbol block.
+
+    `block` starts at the symbol's opening paren, so a direct child sits at
+    depth 1. Anything deeper was swallowed by a malformed sibling and does
+    not count.
+    """
+    props = {}
+    depth = 0
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(block):
+        char = block[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "(":
+            if depth == 1 and block.startswith('(property "', index):
+                quote = block.index('"', index + 11)
+                name = block[index + 11:quote]
+                after = block.index('"', quote + 1)
+                props[name] = block[quote + 1:after]
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        index += 1
+    return props
+```
+
+Then rewrite the per-symbol loop to iterate `_top_level_symbols` and check
+`_direct_properties(block)` instead of accumulating `present_fields` from lines. Keep every
+existing validation rule unchanged in substance: the mandatory-field check, the `DigiKey_SKU`
+alias normalization, the `Category` membership check against `ALLOWED_CATEGORIES`, and the
+`Datasheet` URL checks. The only change is WHERE a field is looked for.
+
+- [ ] **Step 4: Run the new test and the whole linter suite**
+
+Run: `python -m unittest tests.test_linter_validator -v`
+Expected: all pass, including the new one and `test_digikey_sku_property_lints_clean`, which
+must still pass because its fixture is well-formed and its extra `DigiKey_SKU` property is a
+direct child.
+
+- [ ] **Step 5: Prove well-formed files still pass**
+
+This is the load-bearing regression risk: a structural parser that is too strict would reject
+the 20 good parts. Run the linter over the real library:
+
+```bash
+python scripts/linter_validator.py Symbols
+```
+
+Expected: zero errors. If any of the 20 existing parts is now reported missing a field, the
+parser is wrong, not the library.
+
+- [ ] **Step 6: Add a test that the malformed Electrical file is rejected**
+
+Add to the same test file a case that reads the actual corrupt file when it is present, and
+skips when it is not, so the test is meaningful in this workspace without becoming a hard
+dependency on a board checkout:
+
+```python
+    def test_electrical_scratch_library_is_rejected(self):
+        source = (DEVOPS_DIR.parent / "Boards" / "X19-Electrical-New-Member-Board"
+                  / "libs" / "temporary_New_member_lib.kicad_sym")
+        if not source.is_file():
+            self.skipTest("Electrical board scratch library is not present")
+        errors = check_kicad_symbol_file(source)
+        self.assertTrue(errors, "the known-corrupt file must not lint clean")
+```
+
+- [ ] **Step 7: Run the full DevOps suite**
+
+Run: `python -m unittest discover -s tests -v`
+Expected: `OK`. Note the suite takes roughly 13 minutes.
+
+- [ ] **Step 8: Commit, one per repository**
+
+```bash
+git -C KiCad/DevOps add scripts/linter_validator.py tests/test_linter_validator.py
+git -C KiCad/DevOps commit -m "fix(linter): detect contract properties structurally
+
+The linter scanned a symbol file line by line with a regex, so a
+(property ...) line nested inside a malformed sibling counted as a
+symbol property. A corrupt file therefore produced a false pass: a
+symbol with no Manufacturer and no Datasheet was reported compliant.
+
+That is how a scratch library in the Electrical board, whose Value
+property is missing a closing paren and swallows all five contract
+properties, was able to report success on import. A gate that a corrupt
+file walks through is worse than no gate, so this parses depth instead
+of lines. Every existing validation rule is kept; only where a field is
+looked for changes."
+```
+
+Commit the `KiCad/Libraries` half the same way, listing only `scripts/linter_validator.py`.
+Both copies must change together, because `rov.py` prefers the library's copy and falls back to
+this one.
 
 **Files:**
 - Source (read-only): `KiCad/Boards/X19-Float-Board/CustomComponents/buck_tps561208.kicad_sym`, `X19-Float-Board/CustomComponents/footprints.pretty/DDC0006A_N.kicad_mod`
