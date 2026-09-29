@@ -1121,21 +1121,24 @@ sys.path.insert(0, str(DEVOPS_DIR / "scripts"))
 import consolidate_symbol_refs as csr
 
 
+# Indented with TABS, because that is what KiCad actually writes into a
+# schematic's lib_symbols block. A two-space-indented fixture would pass
+# against a two-space-anchored pattern that matches nothing in reality.
 SCHEMATIC = '''(kicad_symbol_lib (version 20211014) (generator eeschema)
 
-  (lib_symbols
-    (symbol "board_control_manual_lib:INA237AIDGSR" (in_bom yes) (on_board yes)
-      (property "Value" "INA237AIDGSR" (id 0) (at 0 0 0))
-    )
-    (symbol "INA237AIDGSR_0_1"
-      (rectangle (start -1 1) (end 1 -1))
-    )
-  )
+\t(lib_symbols
+\t\t(symbol "board_control_manual_lib:INA237AIDGSR" (in_bom yes) (on_board yes)
+\t\t\t(property "Value" "INA237AIDGSR" (id 0) (at 0 0 0))
+\t\t)
+\t\t(symbol "INA237AIDGSR_0_1"
+\t\t\t(rectangle (start -1 1) (end 1 -1))
+\t\t)
+\t)
 
-  (symbol (lib_id "board_control_manual_lib:INA237AIDGSR") (at 10 10 0)
-    (property "Reference" "U1" (at 10 10 0))
-    (property "Footprint" "VSSOP_IDGSR_TEX" (at 10 10 0) (hide yes))
-  )
+\t(symbol (lib_id "board_control_manual_lib:INA237AIDGSR") (at 10 10 0)
+\t\t(property "Reference" "U1" (at 10 10 0))
+\t\t(property "Footprint" "VSSOP_IDGSR_TEX" (at 10 10 0) (hide yes))
+\t)
 )
 '''
 
@@ -1180,6 +1183,21 @@ class TestRepoint(unittest.TestCase):
         self.assertIn('(lib_id "rov_sensors:INA237AIDGSR")', result.text)
         self.assertIn('(symbol "rov_sensors:INA237AIDGSR"', result.text)
         self.assertNotIn("board_control_manual_lib:INA237AIDGSR", result.text)
+
+    def test_extractor_finds_tab_indented_cached_symbols(self):
+        """A two-space-anchored pattern matches nothing in a real schematic.
+
+        Every cached lib_symbols entry KiCad writes into a schematic is
+        tab-indented, so an anchored pattern silently repoints nothing and
+        still reports success.
+        """
+        found = csr.extract_top_symbols(SCHEMATIC)
+        keys = [name for name, _body, _start, _end in found]
+        self.assertIn("board_control_manual_lib:INA237AIDGSR", keys,
+                      f"tab-indented cached symbols were not found: {keys}")
+        for name, body, start, end in found:
+            self.assertTrue(body.startswith('(symbol "'), f"bad body start: {body[:40]}")
+            self.assertEqual(body[-1], ")", f"body does not end at its closing paren: {body[-40:]}")
 
     def test_leaves_derived_subsymbols_alone(self):
         result = csr.repoint_schematic(SCHEMATIC, self.lib)
@@ -1312,10 +1330,18 @@ def find_block_end(text: str, start: int) -> int:
 
 
 def extract_top_symbols(text: str) -> list[tuple[str, str, int, int]]:
-    """Return (name, body, start, end) for every top-level symbol in a library."""
+    """Return (name, body, start, end) for every top-level symbol in a library.
+
+    The pattern is NOT anchored to two spaces. KiCad writes the aggregate
+    library files with spaces and the schematics' cached lib_symbols blocks
+    with tabs; in a real board schematic all 21 cached entries are
+    tab-indented and none are two-space, so an anchored pattern silently
+    finds nothing and the whole consolidation becomes a no-op that still
+    reports success.
+    """
     found = []
-    for match in re.finditer(r'^  \(symbol "([^"]+)"', text, re.M):
-        start = match.start() + 2
+    for match in re.finditer(r'^[ \t]+\(symbol "([^"]+)"', text, re.M):
+        start = match.start() + match.group(0).index("(symbol")
         end = find_block_end(text, start)
         found.append((match.group(1), text[start:end], start, end))
     return found
@@ -1404,12 +1430,14 @@ def repoint_schematic(text: str, library_dir: Path) -> Result:
             )
             skipped.add(key)
             continue
-        pattern = re.compile(r'^  \(symbol "' + re.escape(key) + r'"', re.M)
+        # Match any leading whitespace, for the tab-indented cached entries
+        # in a schematic as well as the space-indented aggregate libraries.
+        pattern = re.compile(r'^[ \t]+\(symbol "' + re.escape(key) + r'"', re.M)
         while True:
             match = pattern.search(out)
             if match is None:
                 break
-            start = match.start() + 2
+            start = match.start() + match.group(0).index("(symbol")
             end = find_block_end(out, start)
             out = out[:start] + replacement + out[end:]
             note = f"{key} -> {new_nick}:{new_name}"
