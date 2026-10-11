@@ -579,6 +579,7 @@ class TestLibraryCommands(unittest.TestCase):
         ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
             rov_core, "is_clean_worktree", return_value=True
         ), patch.object(rov_core, "run_git", fake_run_git):
+            (Path(tmp) / "Symbols" / "parts").mkdir(parents=True)
             result = rov.run_library_sync(Path(tmp), branch="main")
 
         self.assertEqual(result.status, "PASS")
@@ -613,6 +614,7 @@ class TestLibraryCommands(unittest.TestCase):
         ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
             rov_core, "is_clean_worktree", return_value=True
         ), patch.object(rov_core, "run_git", fake_run_git):
+            (Path(tmp) / "Symbols" / "parts").mkdir(parents=True)
             result = rov.run_library_sync(Path(tmp))
 
         self.assertEqual(result.status, "BLOCKED")
@@ -633,6 +635,7 @@ class TestLibraryCommands(unittest.TestCase):
         ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
             rov_core, "is_clean_worktree", return_value=True
         ), patch.object(rov_core, "run_git", fake_run_git):
+            (Path(tmp) / "Symbols" / "parts").mkdir(parents=True)
             result = rov.run_library_sync(Path(tmp))
 
         self.assertEqual(result.status, "BLOCKED")
@@ -650,6 +653,7 @@ class TestLibraryCommands(unittest.TestCase):
         ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
             rov_core, "is_clean_worktree", return_value=True
         ), patch.object(rov_core, "run_git", fake_run_git):
+            (Path(tmp) / "Symbols" / "parts").mkdir(parents=True)
             result = rov.run_library_sync(Path(tmp))
 
         self.assertEqual(result.status, "BLOCKED")
@@ -662,6 +666,24 @@ class TestLibraryCommands(unittest.TestCase):
         ), no_git(), patch.object(rov_core, "is_git_worktree", return_value=False):
             result = rov.run_library_sync(Path(tmp))
         self.assertEqual(result.status, "BLOCKED")
+
+    def test_library_sync_is_blocked_outside_a_library_checkout(self):
+        calls: list[list[str]] = []
+
+        def fake_run_git(repo_dir, *args, check=False, timeout=None):
+            calls.append(list(args))
+            return completed(0, "Already up to date.\n")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            rov.shutil, "which", return_value="/usr/bin/git"
+        ), patch.object(rov_core, "is_git_worktree", return_value=True), patch.object(
+            rov_core, "is_clean_worktree", return_value=True
+        ), patch.object(rov_core, "run_git", fake_run_git):
+            result = rov.run_library_sync(make_board(Path(tmp)))
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("not a library", result.message)
+        self.assertEqual(calls, [])
 
     def test_library_validate_uses_the_library_linter(self):
         with tempfile.TemporaryDirectory() as tmp:

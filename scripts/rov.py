@@ -850,6 +850,15 @@ def run_library_sync(library_dir: Path, branch: str = rov_core.LIBRARY_BRANCH) -
             f"{library} has local changes, so it was left untouched. Commit or stash "
             "them, then run this command again.",
         )
+    if not (library / "Symbols" / "parts").is_dir():
+        return CheckResult(
+            "library-sync",
+            rov_core.STATUS_BLOCKED,
+            f"{library} is not a library checkout (no Symbols/parts directory), so "
+            "it was left untouched. Run this from the KiCad library repository, or "
+            "pass --library-dir pointing at one. (To update a board's library "
+            "submodule instead, use 'board sync-library' from the board root.)",
+        )
 
     fetch = _bounded_library_git(
         library, rov_core.LIBRARY_FETCH_TIMEOUT_SECONDS, "fetch", "origin", branch
